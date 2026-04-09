@@ -7,9 +7,6 @@ import argparse
 import random
 import logging
 
-# Add project root to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,12 +20,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 import torch.distributed as dist
 
-from data.dataset import TTSDataset, collate_fn
-from data.audio_utils import ensure_sr
-from autoencoder.latent_encoder import LatentEncoder
-from autoencoder.latent_decoder import LatentDecoder1D
-from autoencoder.discriminators import MultiPeriodDiscriminator, MultiResolutionDiscriminator
-from utils import MelSpectrogramNoLog, LinearMelSpectrogram
+from dataset import TTSDataset, collate_fn
+from bluecodec.audio_utils import ensure_sr
+from bluecodec.autoencoder.latent_encoder import LatentEncoder
+from bluecodec.autoencoder.latent_decoder import LatentDecoder1D
+from bluecodec.autoencoder.discriminators import MultiPeriodDiscriminator, MultiResolutionDiscriminator
+from bluecodec.utils import MelSpectrogramNoLog, LinearMelSpectrogram
 
 # --- Utils ---
 

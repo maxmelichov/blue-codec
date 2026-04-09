@@ -1,40 +1,48 @@
 [project]
 name = "bluecodec"
 version = "0.1.0"
-requires-python = ">=3.11"
+description = "Speech autoencoder codec"
+readme = "README.md"
+requires-python = ">=3.12"
 dependencies = [
     "numpy",
     "soundfile",
     "tqdm",
     "tensorboard",
+    "huggingface-hub",
+    "safetensors",
+    "torchcodec>=0.11.0",
 ]
 
 [project.optional-dependencies]
-cu128 = [
-    "torch",
-    "torchaudio",
-]
-cu132 = [
-    "torch",
-    "torchaudio",
+cu130 = ["torch>=2.10.0", "torchaudio>=2.10.0"]
+cu128 = ["torch>=2.10.0", "torchaudio>=2.10.0"]
+
+[tool.uv]
+conflicts = [
+    [{ extra = "cu130" }, { extra = "cu128" }],
 ]
 
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cu128", marker = "extra == 'cu128'" },
-    { index = "pytorch-cu132", marker = "extra == 'cu132'" },
-]
-torchaudio = [
-    { index = "pytorch-cu128", marker = "extra == 'cu128'" },
-    { index = "pytorch-cu132", marker = "extra == 'cu132'" },
-]
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
-[[tool.uv.index]]
-name = "pytorch-cu132"
-url = "https://download.pytorch.org/whl/cu132"
-explicit = true
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu130", extra = "cu130" },
+    { index = "pytorch-cu128", extra = "cu128" },
+]
+torchaudio = [
+    { index = "pytorch-cu130", extra = "cu130" },
+    { index = "pytorch-cu128", extra = "cu128" },
+]
+
+[build-system]
+requires = ["uv_build>=0.9.13,<0.10.0"]
+build-backend = "uv_build"
