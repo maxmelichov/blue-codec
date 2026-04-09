@@ -25,10 +25,10 @@ import torch.distributed as dist
 
 from data.dataset import TTSDataset, collate_fn
 from data.audio_utils import ensure_sr
-from models.autoencoder.latent_encoder import LatentEncoder
-from models.autoencoder.latent_decoder import LatentDecoder1D
-from models.autoencoder.discriminators import MultiPeriodDiscriminator, MultiResolutionDiscriminator
-from models.utils import MelSpectrogramNoLog, LinearMelSpectrogram
+from autoencoder.latent_encoder import LatentEncoder
+from autoencoder.latent_decoder import LatentDecoder1D
+from autoencoder.discriminators import MultiPeriodDiscriminator, MultiResolutionDiscriminator
+from utils import MelSpectrogramNoLog, LinearMelSpectrogram
 
 # --- Utils ---
 
