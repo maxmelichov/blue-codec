@@ -1,6 +1,6 @@
 # Stage 1: Speech Autoencoder
 
-**Script:** `src/train_autoencoder.py`
+**Script:** `train_autoencoder.py`
 **Hardware:** 2× RTX 3090 (PyTorch DDP)
 **Iterations:** 1,500,000
 
@@ -258,46 +258,12 @@ Checkpoint contents:
 
 ---
 
-## Running Stage 1
-
-### Initial training
-
-```bash
-torchrun --nproc_per_node=4 src/train_autoencoder.py \
-    --arch_config configs/tts.json
-```
-
-### Resume from checkpoint
-
-```bash
-torchrun --nproc_per_node=4 src/train_autoencoder.py \
-    --resume checkpoints/ae/ae_latest.pt
-```
-
-### Finetune (reset optimizer + step counter)
-
-```bash
-torchrun --nproc_per_node=4 src/train_autoencoder.py \
-    --resume checkpoints/ae/ae_latest.pt \
-    --finetune \
-    --lr 1e-5
-```
-
-### With reconstruction evaluation sample
-
-```bash
-torchrun --nproc_per_node=4 src/train_autoencoder.py \
-    --eval_input path/to/sample.wav
-```
-
----
-
 ## Next Step
 
 After Stage 1 completes (or at any checkpoint), run:
 
 ```bash
-python compute_latent_stats.py --tts-json configs/tts.json
+python compute_latent_stats.py --tts-json config/tts.json
 # → outputs: stats_real_data.pt
 ```
 
