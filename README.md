@@ -21,3 +21,7 @@ Pretrained weights: [notmax123/blue-codec](https://huggingface.co/notmax123/blue
 ## Training
 
 For detailed instructions on how to train the Autoencoder, please refer to the [Training Documentation](docs/training.md).
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
