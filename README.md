@@ -14,7 +14,7 @@ See `examples/` folder for a full working example.
 
 ## Pretrained Model
 
-The pretrained model was trained on 2x NVIDIA RTX 3090 GPUs for 4 weeks on 6 million files with different languages, totaling about 11,000 hours of audio.
+The model was trained on 2x NVIDIA RTX 3090 GPUs for 4 weeks on 6 million files with different languages, totaling about 11,000 hours of audio.
 
 Pretrained weights: [notmax123/blue-codec](https://huggingface.co/notmax123/blue-codec) on Hugging Face.
 
