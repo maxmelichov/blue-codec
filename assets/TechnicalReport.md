@@ -184,7 +184,7 @@ The autoencoder was trained on a large, multilingual corpus totalling several th
 | Dataset         | Hours   | Speakers | Notes                                                   |
 |-----------------|---------|----------|---------------------------------------------------------|
 | **HiFi-TTS v1** | ~292    | 10       | High-SNR (≥32 dB), ≥13 kHz bandwidth, 44.1 kHz [4]    |
-| **HiFi-TTS v2** | ~31,700 | 4,600+   | Large-scale LibriVox subset, 44.1 kHz bandwidth [5]    |
+| **HiFi-TTS v2** | ~2,000  | —        | Subset of large-scale LibriVox corpus, 44.1 kHz; pre-segmented into chunks ≤15 s (~1M files) [5] |
 | **LibriTTS**    | ~585    | 2,456    | Multi-speaker audiobooks, 24 kHz (upsampled) [6]       |
 | **LJSpeech**    | ~24     | 1        | Single-speaker (female), clean studio quality [7]      |
 | **VCTK-44k**    | ~44     | 110      | Multi-accent English, resampled to 44.1 kHz [8]        |
