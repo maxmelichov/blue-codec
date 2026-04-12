@@ -177,7 +177,7 @@ Each iteration proceeds as follows:
 
 ## 7. Training Data
 
-The autoencoder was trained on a large, multilingual corpus totalling several thousand hours of speech, with particular emphasis on broad acoustic diversity and high audio quality at 44.1 kHz.
+The autoencoder was trained on a large, multilingual corpus totalling approximately **11,000 hours** of speech across **more than 6 million audio files**, with particular emphasis on broad acoustic diversity and high audio quality at 44.1 kHz. All files were segmented to a maximum duration of 15 seconds prior to training.
 
 ### 7.1 English Corpora
 
@@ -215,20 +215,28 @@ The Hebrew data constitutes a significant portion of the overall corpus and enab
 
 ## 8. Key Differences from SupertonicTTS
 
-While BlueCodec draws architectural inspiration from SupertonicTTS [1], several design choices diverge:
+While BlueCodec draws architectural inspiration from SupertonicTTS [1], several design choices diverge. The table below uses exact architecture details from the SupertonicTTS paper (arXiv:2503.23108, Appendix A.1).
 
-| Aspect                    | SupertonicTTS                    | BlueCodec                                          |
-|---------------------------|----------------------------------|----------------------------------------------------|
-| **Input features**        | Log-mel spectrogram              | Concatenated log-linear + log-mel (1253 channels)  |
-| **Sample rate**           | Not specified (likely 24 kHz)    | 44.1 kHz throughout                                |
-| **Latent dimensionality** | Not specified                    | 24                                                 |
-| **Decoder dilations**     | Not specified                    | `[1,2,4,1,2,4,1,1,1,1]`                           |
-| **MRD normalization**     | Weight norm                      | Spectral norm                                      |
-| **Vocoder head**          | Two linear layers + PReLU        | CausalConv + PReLU + 1×1 Conv + sub-pixel reshape  |
-| **Loss weights**          | Not specified                    | λ_recon=45, λ_adv=1, λ_fm=0.1                     |
-| **Recon loss domain**     | Mel spectrogram (log)            | Mel spectrogram (linear amplitude, no log)          |
-| **Training languages**    | Not specified                    | English, German, Spanish, Italian, Hebrew           |
-| **Training hardware**     | Not specified                    | 2× RTX 3090, DDP                                   |
+| Aspect                        | SupertonicTTS [1]                                                              | BlueCodec                                                                         |
+|-------------------------------|--------------------------------------------------------------------------------|-----------------------------------------------------------------------------------|
+| **Encoder input**             | 228-dim log-mel spectrogram                                                    | 1253-dim: log-linear (1025) + log-mel (228) concatenated                          |
+| **Encoder stem**              | Conv1d 228→512 (k=7) + BatchNorm                                              | Conv1d 1253→512 (k=7) + BatchNorm                                                 |
+| **Encoder blocks**            | 10× ConvNeXt (dim=512, intermediate=2048, k=7, dilation=1), non-causal        | 10× ConvNeXt (dim=512, intermediate=2048, k=7, dilation=1), non-causal            |
+| **Encoder projection**        | Linear 512→24 + LayerNorm                                                     | Conv1d 1×1 512→24 + LayerNorm                                                     |
+| **Decoder stem**              | CausalConv1d 24→512 (k=7) + BatchNorm                                        | CausalConv1d 24→512 (k=7), no BatchNorm in stem                                   |
+| **Decoder blocks**            | 10× dilated CausalConvNeXt (dim=512, intermediate=2048, k=7) + BatchNorm     | 10× dilated CausalConvNeXt (dim=512, intermediate=2048, k=7) + BatchNorm          |
+| **Decoder dilations**         | `[1, 2, 4, 1, 2, 4, 1, 1, 1, 1]`                                             | `[1, 2, 4, 1, 2, 4, 1, 1, 1, 1]`                                                 |
+| **Vocoder head**              | CausalConv1d 512→2048 (k=3) → Linear 2048→512 → reshape                     | CausalConv1d 512→2048 (k=3) → **PReLU** → Conv1d 1×1 2048→512 → transpose+reshape |
+| **Latent dimensionality**     | 24                                                                             | 24                                                                                |
+| **MPD**                       | 5 sub-nets, periods {2,3,5,7,11}, 6 conv layers (16,64,256,512,512,1), weight norm | 5 sub-nets, periods {2,3,5,7,11}, 6 conv layers (16,64,256,512,512,1), weight norm |
+| **MRD**                       | FFT {512,1024,2048}, hop=FFT/4, 6 Conv2d layers (Table 7), weight norm       | FFT {512,1024,2048}, hop=FFT/4, 6 Conv2d layers (Table 7), **spectral norm**      |
+| **Recon loss domain**         | Log-mel spectrogram                                                            | Linear-amplitude mel (no log)                                                     |
+| **Loss weights**              | Not specified                                                                  | λ_recon=45, λ_adv=1, λ_fm=0.1                                                    |
+| **Sample rate**               | Not specified                                                                  | 44.1 kHz throughout                                                               |
+| **Training data**             | Not specified                                                                  | ~11,000 h, 6M+ files, multilingual (EN/DE/ES/IT/HE)                              |
+| **Training hardware**         | Not specified                                                                  | 2× RTX 3090, PyTorch DDP                                                          |
+
+The most consequential differences are: (1) the richer dual-channel input representation, which provides both perceptually weighted and fine-grained linear spectral information to the encoder; (2) the addition of a PReLU nonlinearity in the vocoder head, which improves waveform modelling capacity; and (3) the use of spectral normalization in the MRD for additional training stability.
 
 ---
 
@@ -247,7 +255,7 @@ This computes per-channel mean and standard deviation of the latent space over t
 
 ## References
 
-[1] SupertonicTTS — latent diffusion TTS with speech autoencoder, text-to-latent module, and duration predictor.
+[1] SupertonicTTS (2025). *SupertonicTTS: A Lightweight and Flexible Text-to-Speech System with Latent Diffusion.* arXiv:2503.23108.
 
 [2] Siuzdak, H. (2023). *Vocos: Closing the gap between time-domain and Fourier-based neural vocoders for high-quality audio synthesis.* arXiv:2306.00814.
 
