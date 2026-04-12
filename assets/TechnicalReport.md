@@ -243,39 +243,31 @@ The three genuine architectural differences are: **(1)** the dual-channel input 
 
 ---
 
-## 9. Design Rationale
+## 9. Developer Insights & Architectural Rationale
 
-While BlueCodec shares its foundational DNA with SupertonicTTS, several deliberate deviations were made to improve training stability, synthesis quality, and phonetic inclusivity. This section documents the reasoning behind each key technical choice.
+While BlueCodec shares its foundational DNA with SupertonicTTS [1], the deviations introduced here were not arbitrary. They were chosen to improve training stability, synthesis quality, and phonetic coverage while preserving the efficiency of the original design.
 
 ### 9.1 The Dual-Branch Input Advantage
 
-Standard mel-spectrograms are excellent at approximating human auditory perception, but they inherently compress and discard high-frequency spectral detail through the Mel filterbank projection. By feeding the encoder a 1253-channel dual-branch input — concatenating 1025 log-linear STFT bins with 228 log-mel bins — the network receives the best of both worlds: raw, uncompressed spectral precision alongside perceptually weighted structure. The log-linear component preserves fine harmonic detail and transient information that Mel filtering would otherwise smooth away, while the log-mel component anchors the representation in perceptually relevant frequency space.
+Standard mel spectrograms are effective because they approximate human auditory perception, but that compression inevitably discards part of the high-frequency detail present in the original spectrum. BlueCodec therefore feeds the encoder a 1253-channel dual-branch representation formed by concatenating 1025 log-linear bins with 228 log-mel bins. This gives the model both raw spectral precision and perceptually organized structure at the same time. In practice, this richer representation improved early optimization behavior and accelerated reconstruction-loss convergence relative to mel-only inputs.
 
-In practice, this richer input directly accelerates training loss convergence. The encoder can leverage the redundancy between the two branches to form more stable internal representations early in training, reducing the number of iterations required before the GAN loss becomes meaningful.
+### 9.2 PReLU in the Sub-Pixel Vocoder
 
-### 9.2 PReLU in the Sub-Pixel Vocoder Head
+The decoder must expand a low-rate latent sequence at roughly 86 Hz into a full 44.1 kHz waveform, making the vocoder head a critical capacity bottleneck. Inspired by WaveNeXt, BlueCodec keeps the sub-pixel flattening strategy but inserts a PReLU nonlinearity between the causal projection layers. This is a small modification architecturally, yet an important one functionally: it increases the expressiveness of the head and improves gradient flow when reconstructing fine temporal structure and high-frequency waveform detail.
 
-The vocoder head is the single most asymmetric component in the entire system: it must expand a low-rate (~86 Hz) 512-dimensional frame representation into a 44,100 Hz continuous waveform — a 512× temporal upsampling ratio achieved purely through sub-pixel flattening. This bottleneck demands maximum representational capacity.
+### 9.3 Taming GAN Instability with Spectral Normalization
 
-Inspired by WaveNeXt [3], BlueCodec adopts the sub-pixel flattening strategy but inserts a PReLU nonlinearity between the causal projection layers. Unlike a hard ReLU, PReLU's learnable negative slope allows gradients to flow through negative activations, which is critical when modelling the fine-grained signed waveform values that define high-frequency audio structure. This single structural change meaningfully increases the vocoder's capacity to reconstruct complex, perceptually salient waveform features without adding significant parameter count.
-
-### 9.3 Spectral Normalization in the MRD for Stable Adversarial Training
-
-Training adversarial networks on high-resolution 44.1 kHz audio is notoriously prone to instability and mode collapse, particularly in the early stages when the generator produces poor outputs. The Multi-Resolution Discriminator operates on log-magnitude spectrograms at three FFT scales simultaneously, giving it a large and diverse perceptual surface to critique — which, without constraint, can cause it to overpower the generator.
-
-By applying spectral normalization [14] to all MRD convolutional layers, we explicitly bound the Lipschitz constant of each layer. This prevents the discriminator from producing arbitrarily large gradients that destabilize the generator update, yielding a highly stable optimization curve across the full 1.5 million training iterations. Weight normalization (used in the MPD and in SupertonicTTS's MRD) does not provide this Lipschitz guarantee and can allow unbounded spectral growth, which we found to be more problematic in the multi-resolution setting.
+Adversarial training at high audio fidelity is often unstable, especially when discriminators become too strong early in training. SupertonicTTS uses weight normalization throughout its discriminators, but in BlueCodec the Multi-Resolution Discriminator was deliberately switched to spectral normalization. By constraining the effective Lipschitz behavior of the MRD layers, this change reduces the risk of discriminator domination and helps maintain a smoother optimization trajectory over the full 1.5 million-step run.
 
 ### 9.4 A Richer, Multilingual Latent Space
 
-Most open-source speech autoencoders are heavily biased toward English phonetics, which limits their utility as general-purpose acoustic backends for multilingual TTS systems. BlueCodec was deliberately trained on a diverse 11,000-hour corpus spanning five languages, forcing the 24-dimensional latent space to encode a far broader range of phonetic phenomena.
+Many open speech autoencoders are implicitly biased toward English phonetics because their training data is dominated by English corpora. BlueCodec instead learns its 24-dimensional latent space from a broad multilingual mixture spanning approximately 11,000 hours and more than 6 million files. The strong inclusion of Hebrew is especially important: corpora such as [SententicDataTTS](https://huggingface.co/datasets/notmax123/SententicDataTTS), [RanLevi40h](https://huggingface.co/datasets/notmax123/RanLevi40h), and [Knesset-VOX-IPA](https://huggingface.co/datasets/notmax123/Knesset-VOX-IPA) expose the model to phonetic patterns that are rare or absent in English-only training, including emphatic fricatives, uvulars, and pharyngeal-adjacent articulations. This materially improves the inclusivity and robustness of the latent representation.
 
-The inclusion of large-scale Modern Hebrew data is particularly significant. Hebrew exhibits a distinct phonological inventory — including uvular fricatives, pharyngeal consonants, and a vowel system that differs substantially from Germanic and Romance languages — that would be absent or poorly represented in an English-centric model. Datasets such as SententicDataTTS [10] and Knesset-VOX-IPA [12] provide thousands of hours of naturalistic Hebrew speech, ensuring that these phonetic categories are well-sampled throughout the latent space. This lays the necessary groundwork for Stage 2 (text-to-latent) and Stage 3 (duration predictor) to operate accurately across Hebrew input.
+### 9.5 High-Fidelity on Consumer Hardware
 
-### 9.5 High-Fidelity Synthesis on Consumer Hardware
+Achieving real-time 44.1 kHz streaming synthesis is often associated with large compute clusters. BlueCodec shows that strong neural audio compression can be trained on consumer hardware. Efficient ConvNeXt blocks (depthwise-separable convolutions instead of heavy recurrence), a compact 24-channel latent bottleneck, and the sub-pixel expansion head keep the autoencoder footprint modest (on the order of ~51M parameters for encoder + decoder) while targeting full-band reconstruction.
 
-Achieving real-time 44.1 kHz streaming audio synthesis is often associated with large compute clusters. BlueCodec demonstrates that high-fidelity neural audio compression can be achieved on consumer hardware. The combination of efficient ConvNeXt blocks (which replace expensive recurrent layers with depthwise separable convolutions), a low-dimensional 24-channel latent bottleneck, and the sub-pixel expansion head keeps the parameter count manageable (~51M total for encoder + decoder) while preserving reconstruction quality.
-
-Training on two RTX 3090 GPUs using PyTorch DDP over approximately four weeks produced a model that closely matches the quality of systems trained on four RTX 4090s — demonstrating that architectural efficiency, not raw compute, is the primary lever for this class of model.
+SupertonicTTS reports Stage 1 training on four RTX 4090 GPUs [1]. Using the same iteration budget and batch size on **two RTX 3090** GPUs with PyTorch DDP, this build completed in roughly **four weeks** — a practical datapoint that architectural efficiency and a well-matched training recipe matter as much as raw accelerator count for this class of model.
 
 ---
 
@@ -306,5 +298,3 @@ Training on two RTX 3090 GPUs using PyTorch DDP over approximately four weeks pr
 [12] notmax123 (2025). *Knesset VOX IPA.* HuggingFace. https://huggingface.co/datasets/notmax123/Knesset-VOX-IPA
 
 [13] Ben-David, E., et al. (2025). *VoxKnesset: A Large-Scale Longitudinal Hebrew Speech Dataset for Aging Speaker Modeling.* arXiv:2603.01270.
-
-[14] Miyato, T., Kataoka, T., Koyama, M., & Yoshida, Y. (2018). *Spectral Normalization for Generative Adversarial Networks.* ICLR 2018. arXiv:1802.05957.
