@@ -279,19 +279,6 @@ Training on two RTX 3090 GPUs using PyTorch DDP over approximately four weeks pr
 
 ---
 
-## 10. Next Steps
-
-After Stage 1 completes, latent statistics must be computed before Stage 2:
-
-```bash
-uv run compute_latent_stats.py --tts-json config/tts.json
-# → outputs: stats_real_data.pt
-```
-
-This computes per-channel mean and standard deviation of the latent space over the training set, which are loaded into the decoder's `latent_mean` and `latent_std` buffers for normalization at inference time.
-
----
-
 ## References
 
 [1] SupertonicTTS (2025). *SupertonicTTS: A Lightweight and Flexible Text-to-Speech System with Latent Diffusion.* arXiv:2503.23108.
