@@ -1,7 +1,6 @@
 import torch
 from torch.utils.data import Dataset
 import soundfile as sf
-import pandas as pd
 import os
 import random
 import string
@@ -9,8 +8,7 @@ import glob
 import numpy as np
 import torchaudio
 import torch.nn.functional as F
-from data.text_vocab import text_to_indices, CHAR_TO_ID, ID_TO_CHAR, VOCAB_LIST
-from data.audio_utils import ensure_sr
+from bluecodec.audio_utils import ensure_sr
 
 class TTSDataset(Dataset):
     def __init__(self, data_sources, sample_rate=44100, segment_size=None):
@@ -38,6 +36,7 @@ class TTSDataset(Dataset):
             elif os.path.isfile(source) and source.endswith(".csv"):
                 # Case 2: Metadata CSV
                 try:
+                    import pandas as pd
                     # Assumes CSV with | separator: wav_path|text|normalized_text
                     df = pd.read_csv(source, sep='|', header=None, usecols=[0, 1], names=['wav_path', 'text'])
                     root_dir = os.path.dirname(source)
@@ -112,10 +111,8 @@ class TTSDataset(Dataset):
             start = torch.randint(0, max_start + 1, (1,)).item()
             wav = wav[start:start + self.segment_size]
 
-        # Text to IDs
-        text_ids = torch.tensor(text_to_indices(text), dtype=torch.long)
-        
-        return wav, text_ids
+        # The autoencoder is trained on audio only; the text column (if any) is not used.
+        return wav, text
 
 def collate_fn(batch):
     # batch: list of (wav, text_ids)

@@ -13,7 +13,11 @@ def compress_latents(z: torch.Tensor, factor: int = 6) -> torch.Tensor:
     # Pad if necessary
     if T % factor != 0:
         pad = factor - (T % factor)
-        z = torch.nn.functional.pad(z, (0, pad))
+        # Replicate the last frame rather than zero-pad. A zero latent is not a code the decoder
+        # was ever trained on: a flow model that learns zero-padded targets emits it at the end of
+        # every utterance and the decoder renders a burst there. (The edge-padded encoder path,
+        # encode_wav_edge_padded, never needs this pad: its kept length is a multiple of factor.)
+        z = torch.cat([z, z[:, :, -1:].expand(-1, -1, pad)], dim=2)
         T = T + pad
         
     z = z.view(B, C, T // factor, factor)
@@ -36,6 +40,32 @@ def decompress_latents(z: torch.Tensor, factor: int = 6, target_channels: int = 
     # Reshape to [B, 24, T_high]
     z = z.flatten(2, 3) # [B, 24, 6*T_low]
     return z
+
+def encode_wav_edge_padded(encoder, spec, wav: torch.Tensor, factor: int = 6, hop: int = 512,
+                           edge_pad_chunks: int = 2):
+    """Encode audio to COMPRESSED latents with the array edge moved out of the kept frames.
+
+    wav: [B, L] (one length; for a batch of different lengths, pad each clip the same way).
+    Returns (z [B, 24*factor, Tc], Tc) with Tc = ceil(L / (hop*factor)) -- the official
+    Supertonic helper's latent length. No frame past the audio end is ever returned, and none
+    is replicated by compress_latents.
+
+    Why (Sept 2026, see assets/TechnicalReport.md sec. 11): the encoder is non-causal with zero
+    conv padding. The encoder trained against the frozen causal Supertonic-3 vocoder on fixed
+    61,740-sample segments learned to write an "edge code" into the last ~3 raw frames whenever the
+    array ends right after audio (last compressed frame ~9x the clip's median norm, vs ~1.5x for
+    the 1.5M encoder). Appending `edge_pad_chunks` whole chunks of silence moves the edge out of
+    the kept frames: with 2 chunks the last kept frame is within a few percent of an encoding with
+    1 s of silence after it, and the reconstruction is unchanged.
+    """
+    chunk = hop * factor
+    L = wav.shape[-1]
+    Tc = -(-L // chunk)
+    L_pad = (Tc + max(0, int(edge_pad_chunks))) * chunk
+    wav = torch.nn.functional.pad(wav, (0, L_pad - L))
+    z = encoder(spec(wav))[..., : Tc * factor]   # centre=True STFT adds one frame past L_pad; never kept
+    return compress_latents(z, factor=factor), Tc
+
 
 class MelSpectrogram(nn.Module):
     def __init__(
