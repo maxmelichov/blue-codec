@@ -34,7 +34,7 @@ At 44 100 Hz with `hop_length = 512`, each latent frame corresponds to exactly 5
 |---|---|
 | `LayerNorm1d` | Channel-wise LayerNorm for `[B, C, T]` tensors (transposes before/after). |
 | `ConvNeXtBlock` | Standard (non-causal) 1-D ConvNeXt block with dilation and layer-scale γ. Used in the encoder and `StyleTTS2Vocoder`. |
-| `CausalConv1d` | `nn.Conv1d` with left-only padding — strictly causal, no future context. |
+| `CausalConv1d` | `nn.Conv1d` with left-only padding — strictly causal, no future context. `pad_mode="zeros"` (default, the 1.5M decoder) or `"replicate"` (the official Supertonic-3 vocoder, whose ONNX Pad nodes are `mode='edge'`). |
 | `CausalDWConv1d` | Thin wrapper around `CausalConv1d` for depthwise use; exposes weight at `dwconv.net.*` to match ONNX trace paths. |
 | `CausalConvNeXtBlock` | Causal variant of `ConvNeXtBlock`; uses `CausalDWConv1d` for the depthwise step. Used in the decoder. |
 
@@ -82,10 +82,17 @@ Causal decoder that reconstructs waveform from latents. Accepts both raw latents
 | `head.hdim` | 2048 | Head intermediate dim |
 | `head.odim` | 512 | Head output channels (= samples per frame) |
 | `head.ksz` | 3 | Head causal conv kernel size |
+| `pad_mode` | `"zeros"` | Causal padding of every CausalConv1d (`"replicate"` for the official Supertonic-3 vocoder) |
 
 Architecture: `CausalInputProjection` → 10 × `CausalConvNeXtBlock` → `BatchNorm1d` → `VocoderHead` (causal conv → PReLU → 1×1 conv → reshape to waveform).
 
 `load_state_dict` contains a remapping layer that handles several historical checkpoint key layouts (`input_conv.*`, `blocks.*`, `head.conv1.*`, etc.) so older checkpoints load without manual surgery.
+
+---
+
+### Official Supertonic-3 vocoder (in `latent_decoder.py`)
+
+`load_supertonic3_decoder()` downloads `onnx/vocoder.onnx` from [Supertone/supertonic-3](https://huggingface.co/Supertone/supertonic-3) (OpenRAIL-M; pinned revision, never bundled with this package) and maps its 103 initializers 1:1 onto a `LatentDecoder1D` built with `pad_mode="replicate"` (`SUPERTONIC3_DECODER_CFG`). It is returned frozen and takes raw `[B, 24, T]` latents. Reading the ONNX file needs `pip install onnx`.
 
 ---
 

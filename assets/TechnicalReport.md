@@ -6,7 +6,7 @@
 
 ## 1. Overview
 
-BlueCodec is a neural speech autoencoder designed to serve as the acoustic backbone of a latent-diffusion-based TTS system. Following the general design principle of SupertonicTTS [1], training is divided into three stages: (1) a speech autoencoder that compresses audio into a compact continuous latent space and reconstructs it, (2) a text-to-latent diffusion module, and (3) a duration predictor. This document covers Stage 1 in full.
+BlueCodec is a neural speech autoencoder designed to serve as the acoustic backbone of a latent-diffusion-based TTS system. Following the general design principle of SupertonicTTS [1], training is divided into three stages: (1) a speech autoencoder that compresses audio into a compact continuous latent space and reconstructs it, (2) a text-to-latent diffusion module, and (3) a duration predictor. This document covers Stage 1 in full. Sections 10–12 (Sept 2026) add an encoder trained against the frozen official Supertonic-3 vocoder, and the end-of-clip latent spike found in it.
 
 The autoencoder is trained within a Generative Adversarial Network (GAN) framework, combining reconstruction, adversarial, and feature matching objectives. The resulting model functions as a neural vocoder with a low-dimensional latent bottleneck, operating at 44.1 kHz with a 24-dimensional latent space at approximately 86 Hz.
 
@@ -271,6 +271,90 @@ SupertonicTTS reports Stage 1 training on four RTX 4090 GPUs [1]. Using the same
 
 ---
 
+## 10. Encoder Trained Against the Frozen Supertonic-3 Vocoder (Sept 2026)
+
+### 10.1 Idea
+
+Supertone's official Supertonic-3 release ships its vocoder (`onnx/vocoder.onnx` on [Supertone/supertonic-3](https://huggingface.co/Supertone/supertonic-3), OpenRAIL-M). Its decoder has exactly our `LatentDecoder1D` layout — CausalConv1d stem, 10 dilated causal ConvNeXt blocks, BatchNorm, PReLU sub-pixel head — so its 103 ONNX initializers map 1:1 onto our 101 decoder tensors (`tts.ae.decoder.*` by name, three anonymous initializers to `embed.net.weight`/`embed.net.bias`/`head.act.weight`; the graph's `latent_mean`, `latent_std` and `normalizer.scale = 0.25` are kept aside). The one difference is padding: every Pad node in the graph is `mode='edge'`, so the port uses replicate causal padding (`pad_mode="replicate"`). On a 4 s clip the port matches onnxruntime to a max abs difference of 7.2e-6 (waveform peak 0.68); the same weights with zero padding differ by 0.46.
+
+We keep that decoder **frozen** and train **only our encoder** through it: the encoder learns to emit the official latent space, the decoder is never updated. The weights are not redistributed; `load_supertonic3_decoder` in `bluecodec/autoencoder/latent_decoder.py` downloads them from the official repo at load time (pinned revision `3cadd1ee`, vocoder md5 `68e5b768810cb3c2cf7a27f3ce2494e3`).
+
+### 10.2 Recipe
+
+| Parameter | Value |
+|-----------|-------|
+| Encoder init | 1.5M-step encoder (identical to the one in `model.safetensors`) |
+| Decoder | official Supertonic-3 vocoder, frozen (`requires_grad=False`, `eval()`), asserted unchanged at every save |
+| Trained | encoder + MPD + MRD |
+| Optimizer / LR | AdamW (β₁=0.8, β₂=0.99, wd=0.01), 8.5×10⁻⁵ cosine → 1×10⁻⁶ over 300k steps |
+| Batch | 2× RTX 5090, 64 segments × 61,740 samples per GPU |
+| Losses | λ_recon=45 on **full-band log mel over the whole segment**; λ_adv=1, λ_fm=0.1 averaged over MPD+MRD layers together (paper Eq. 6); adversarial terms on the 0.19 s crop |
+| D warm-up | first 10k steps reconstruction-only |
+| Wall clock | 2026-09-22 15:22 → 2026-09-23 05:33 |
+| Released | `ae_290000.pt` (the loop exits at 300k before that save) |
+
+Command line and flag reference: [docs/training.md §4](../docs/training.md).
+
+### 10.3 Round-trip audit
+
+Round trip on 10 reference clips from BlueTTS's voice-cloning bench (`libri_*`, LibriTTS recordings at 24 kHz resampled to 44.1 kHz, so the source's 12–22 kHz band is nearly empty and a positive delta there is energy the decoder adds). Bare encoding; the edge-padded numbers are in §11.
+
+| Codec | front-end L1 | front-end L1 >8k | mel228 L1 | mel228 L1 >8 kHz | 12–22 kHz vs source | DNSMOS |
+|-------|------:|------:|------:|------:|------:|------:|
+| BlueCodec 1.5M (`model.safetensors`, zero padding) | 0.4426 | 0.3757 | 1.0094 | 2.2624 | +19.56 dB | 3.40 |
+| 1.5M encoder + decoder-only retrain (full-band log-mel loss, replicate padding; not published) | 0.3604 | 0.2341 | **0.8495** | **1.7274** | **+1.50 dB** | 3.41 |
+| **Encoder trained against the frozen Supertonic-3 vocoder** | **0.3385** | **0.2251** | 0.8944 | 1.9642 | +7.63 dB | **3.42** |
+
+*front-end L1* is the audit metric BlueTTS has used historically as its "log-mel L1": the L1 of `log(clamp(F, 1e-5))` where `F` is the encoder front end (1025 log-linear + 228 log-mel channels); *front-end L1 >8k* is the same over channels `[int(1253·8000/22050):]`. *mel228 L1* is the plain L1 between 228-band log mels (clamp 1e-5), *>8 kHz* over the bands centred above 8 kHz. The 12–22 kHz column is the reconstruction's mean STFT power in 12–22.05 kHz minus the source's; DNSMOS is the overall MOS of the reconstruction resampled to 16 kHz.
+
+Reading: the Supertonic-3-decoder encoder is best on the historical metric and DNSMOS, but the DNSMOS spread (3.40–3.42) is within noise for 10 clips, the retrained decoder is better on the plain mel L1, and the official decoder adds ~6 dB more top-octave energy than the retrained decoder on band-limited sources. Both are large improvements over the published 1.5M decoder (+19.56 dB). This is a 10-clip round-trip audit, not a listening test.
+
+### 10.4 Downstream caveat
+
+This encoder moves the latent space: any stats file, text-to-latent or duration checkpoint and exported voice built on the 1.5M encoder is invalid with it. In BlueTTS a 40k-step text-to-latent finetune onto this autoencoder (Sept 2026) was rejected — cloning similarity on the 10-voice bench dropped by ~45% — so an AE swap is treated as a from-scratch or long-restart event for the downstream models, never a short finetune.
+
+---
+
+## 11. End-of-Clip Edge Code (Sept 2026)
+
+### 11.1 Finding
+
+With bare encoding, the Supertonic-3-decoder encoder writes an **edge code** into the last ~3 raw latent frames of every clip that ends right after audio. Measured in the normalised compressed domain (`((z − mean)/std)·0.25` with that encoder's latent stats), over 50 clips (10 bench references + 40 training clips cut to native / 3072k / 3072k+512 / 3072k+1700 samples):
+
+- the last compressed frame is **8.9×** the clip's median frame norm on average (p50 9.2, max 14.1); the 1.5M encoder: 1.46×;
+- the excess sits on **raw channel 6** (~30σ of the latent stats); raw frames −3/−2/−1 are 2.6× / 6.1× / 10.8× the median, and `compress_latents` replicates the last raw frame into the remainder, so the whole last compressed frame carries it.
+
+A second measurement on the 10 bench references (native length): last frame **9.44×** mean (p50 9.76, max 11.99), top raw channel 6 in 10/10 clips, raw frames −3/−2/−1 at 2.62× / 6.73× / 12.08×. The magnitude depends on the material: on 50 clips drawn from the Italian/Spanish/`test` training corpora (which end in near-silence) it is 3.38× mean (p50 2.38, max 14.59), mostly on raw channel 2.
+
+### 11.2 Cause
+
+The encoder is non-causal with zero convolution padding, so its last frames see the array edge. It was trained against a frozen *causal* decoder on fixed 61,740-sample segments: 61,740 = 120 × 512 + 300, so every training segment ended with the same partial frame (300/512 samples supervised) and the array edge always in the same place. The encoder learned to use that edge. Within the clip, the official decoder renders the code harmlessly (round-trip error over the tail −56.9 vs −56.4 dB), but rendered *as content* — by a flow model that copied it, or through the replicate pad — it is a burst ~38 dB above the silence it replaces (mean −48 vs −86 dBFS RMS).
+
+### 11.3 Fix: edge-padded encoding
+
+`bluecodec.utils.encode_wav_edge_padded` (and `BlueCodec.encode(audio, edge_pad_chunks=2)`) uses the official helper's layout — pad to a multiple of 3072 samples, keep `ceil(L/3072)` compressed frames, never keep the STFT centre frame past the end — plus **2 extra chunks of silence**, so no kept frame sees the edge.
+
+| Encoding | last frame / median, 50 mixed clips | 10 refs | 50 it/es/test clips | last frame vs edge-free (mean / max) |
+|---|---:|---:|---:|---:|
+| bare (classic) | 8.9× | 9.44× | 3.38× | 625% / 737% (10 refs); 272% / 897% (50 clips) |
+| official layout only (pad to 3072) | — | 1.84× | 1.53× | 99% / 363% (50 mixed); 98% / 229% (10 refs); 83% / 254% (50 clips) |
+| **edge-padded, 2 chunks** | **1.35×** | **1.44×** | **1.13×** | **2.3% / 4.2%** (50 mixed); 1.9% / 2.4% (10 refs); 4.0% / 4.2% (50 clips) |
+| edge-free reference (1 s silence appended) | 1.37× | 1.45× | 1.14× | 0 |
+
+Reconstruction is unchanged by the padding (§10.3 clips, bare → edge-padded): front-end L1 0.3385 → 0.3387, 12–22 kHz +7.63 → +7.63 dB, DNSMOS 3.422 → 3.423; for the 1.5M encoder with the retrained decoder 0.3603 → 0.3604.
+
+### 11.4 Downstream effect (BlueTTS, Sept 2026)
+
+A text-to-latent model trained on this encoder's targets, encoded as a batch, learns the edge code from each batch's longest row and ends every B=1 render with it (last 4 generated frames 7–10× the body norm, on channels 6/19/2/23; decoded quietly, about −49 dBFS). On BlueTTS's Hebrew intelligibility test with the same model, encoding the **reference** clip bare versus edge-padded moved PER 0.076 → 0.018 and WER 0.168 → 0.059; on the 10-voice bench with references cut to 3.0/4.3 s, Hebrew PER 0.073 → 0.023. BlueTTS's evaluation now encodes references edge-padded, and its inference script and text-to-latent trainer have opt-ins to do the same. No encoder retrain was needed for this fix, and the existing latent stats and duration predictor stay valid.
+
+---
+
+## 12. Edge-Fixed Encoder (in progress, Sept 2026)
+
+A retrain of the Supertonic-3-decoder encoder that is aware of the array edge (the "edge-fixed encoder") is in progress, to remove the edge code at the source instead of by padding. This section, the training recipe in `docs/training.md` and the Hub weights slot `encoder_supertonic3_decoder_edge_fixed/` will be filled in when it finishes. Until then, use the current encoder with edge-padded encoding.
+
+---
+
 ## References
 
 [1] SupertonicTTS (2025). *SupertonicTTS: A Lightweight and Flexible Text-to-Speech System with Latent Diffusion.* arXiv:2503.23108.
@@ -298,3 +382,5 @@ SupertonicTTS reports Stage 1 training on four RTX 4090 GPUs [1]. Using the same
 [12] notmax123 (2025). *Knesset VOX IPA.* HuggingFace. https://huggingface.co/datasets/notmax123/Knesset-VOX-IPA
 
 [13] Ben-David, E., et al. (2025). *VoxKnesset: A Large-Scale Longitudinal Hebrew Speech Dataset for Aging Speaker Modeling.* arXiv:2603.01270.
+
+[14] Supertone Inc. (2026). *Supertonic 3.* Hugging Face: https://huggingface.co/Supertone/supertonic-3 (model under BigScience OpenRAIL-M; sample code: https://github.com/supertone-inc/supertonic, MIT).

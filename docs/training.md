@@ -54,9 +54,64 @@ uv run train_autoencoder.py
 
 ---
 
+## 🎯 4. Encoder-Only Training Against a Frozen Decoder (Sept 2026)
+
+This mode trains **only the encoder** (plus the discriminators) against a **frozen decoder**, e.g. the official Supertonic-3 vocoder, loaded 1:1 into `LatentDecoder1D` with replicate ("edge") causal padding. The decoder stays in the graph, so the reconstruction and adversarial gradients flow *through* it into the encoder, which learns to emit the latent space that decoder expects.
+
+The official decoder weights are **not** part of this repository. `--decoder supertonic3` downloads `onnx/vocoder.onnx` from [Supertone/supertonic-3](https://huggingface.co/Supertone/supertonic-3) (OpenRAIL-M) at start-up; reading it needs `pip install onnx`. The command that reproduces the released Supertonic-3-decoder encoder:
+
+```bash
+uv pip install onnx
+uv run torchrun --nproc_per_node=2 train_autoencoder.py \
+    --encoder_only --decoder supertonic3 \
+    --init_encoder path/to/model.safetensors \
+    --lr 8.5e-5 --batch_size 64 --total_steps 300000 --d_warmup 10000 \
+    --recon_logmel_fullband --fm_composite --lambda_recon 45 \
+    --checkpoint_dir checkpoints/ae_supertonic3
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--encoder_only` | Decoder frozen (`requires_grad=False`, kept in `eval()` so its BatchNorm statistics never move, not wrapped in DDP, not in any optimizer). `opt_g` holds the encoder only. The decoder is asserted bit-identical at every save. |
+| `--decoder supertonic3` | The official Supertonic-3 vocoder from Hugging Face. A path to an AE `.pt` checkpoint freezes that checkpoint's decoder instead. |
+| `--init_encoder` | Encoder initialisation: an AE `.pt` checkpoint or a BlueCodec `.safetensors` (e.g. the Hub `model.safetensors`). Fresh optimizer, step 0. |
+| `--total_steps` | Loop length and cosine `T_max` (lr down to 1e-6). |
+| `--batch_size` | Per-process batch size (overrides `ae.train.batch_size`). |
+| `--d_warmup N` | Discriminators frozen and a reconstruction-only generator loss for the first N steps. |
+| `--recon_logmel_fullband` | Reconstruction L1 on **log** mels up to sr/2, over the **whole segment** (the 0.19 s crop is kept for the adversarial terms only). Default: linear-magnitude mels capped at 12 kHz on the crop. |
+| `--fm_composite` | Feature matching averaged over the MPD and MRD layers together (paper Eq. 6). Default: the two averages are summed, an effective λ_fm of 0.2. |
+| `--lambda_recon` | Reconstruction weight (default 45). |
+
+Checkpoints written in `--encoder_only` mode store `decoder_source` instead of the decoder weights, so such a checkpoint can be shared without redistributing Supertone's weights. Resuming with `--resume` restores the encoder, discriminators, optimizers and schedule; the decoder is reloaded from `--decoder`.
+
+### The released run
+
+| Setting | Value |
+|---------|-------|
+| Encoder init | the 1.5M-step encoder (identical to the encoder in the Hub `model.safetensors`); discriminators also from the 1.5M training checkpoint |
+| Decoder | official Supertonic-3 `vocoder.onnx` (md5 `68e5b768…`, Hub revision `3cadd1ee`), frozen |
+| Optimizer | AdamW (β = 0.8, 0.99, wd 0.01), fresh state |
+| LR | 8.5e-5, cosine to 1e-6 over 300k steps |
+| Batch | 2 GPUs × 64 segments of 61,740 samples (1.4 s) |
+| Losses | λ_recon 45 on full-band log mel over the whole segment, λ_adv 1, λ_fm 0.1 (composite) |
+| D warm-up | 10k steps reconstruction-only |
+| Hardware / time | 2× RTX 5090, 2026-09-22 15:22 → 2026-09-23 05:33 |
+| Released checkpoint | `ae_290000.pt` (the loop ends at 300k before the 300k save) |
+| Mel loss (TensorBoard) | 3.17 (first 50 logged points) → 1.19 (last 200) |
+
+When starting from the Hub `model.safetensors`, the discriminators start from scratch (the Hub file has no discriminator weights); the 10k-step D warm-up covers that start.
+
+**After training an encoder, recompute the latent statistics** with the new encoder, and use edge-padded encoding (`BlueCodec.encode(..., edge_pad_chunks=2)` / `bluecodec.utils.encode_wav_edge_padded`) for anything a downstream model will see. See the README's *Latent conventions* section.
+
+### Edge-fixed encoder (in progress)
+
+A retrain of this encoder that is aware of the array edge (the "edge-fixed encoder") is running, to remove the end-of-clip edge code at the source rather than by padding. Its recipe and results will be added here when it finishes; its weights slot on the Hub is `encoder_supertonic3_decoder_edge_fixed/`.
+
+---
+
 ## 📊 Model Training Details
 
-The current pretrained model was trained with the following specifications:
+The 1.5M-step pretrained model (`model.safetensors`) was trained with the following specifications:
 - **Hardware:** 2× NVIDIA RTX 3090 GPUs
 - **Duration:** 4 weeks
 - **Steps:** 1.5 million steps
