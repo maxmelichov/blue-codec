@@ -51,8 +51,19 @@ class ConvNeXtBlock(nn.Module):
         return residual + x
 
 class CausalConv1d(nn.Conv1d):
-    def __init__(self, in_channels, out_channels, kernel_size, dilation=1, **kwargs):
+    """Left-padded (causal) Conv1d.
+
+    ``pad_mode`` is the padding applied to the left context:
+      - ``"zeros"`` (default): what the published 1.5M-step BlueCodec decoder was trained with.
+      - ``"replicate"``: what the official Supertonic-3 ``vocoder.onnx`` does (every Pad node in
+        that graph is ``mode='edge'``). Loading the official weights with zero padding diverges
+        from the graph at the first frames; with replicate the port matches it to float round-off.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, dilation=1, pad_mode="zeros", **kwargs):
         self._pad = (kernel_size - 1) * dilation
+        if pad_mode not in ("zeros", "replicate"):
+            raise ValueError(f"pad_mode must be 'zeros' or 'replicate', got {pad_mode!r}")
+        self._pad_mode = pad_mode
         super().__init__(
             in_channels, out_channels,
             kernel_size=kernel_size,
@@ -62,15 +73,18 @@ class CausalConv1d(nn.Conv1d):
         )
 
     def forward(self, x):
-        x = torch.nn.functional.pad(x, (self._pad, 0))
+        if self._pad_mode == "replicate":
+            x = torch.nn.functional.pad(x, (self._pad, 0), mode="replicate")
+        else:
+            x = torch.nn.functional.pad(x, (self._pad, 0))
         return super().forward(x)
 
 class CausalDWConv1d(nn.Module):
     """Wrapper so state-dict path is ``dwconv.net.weight`` (matches ONNX trace)."""
 
-    def __init__(self, dim, kernel_size, dilation=1):
+    def __init__(self, dim, kernel_size, dilation=1, pad_mode="zeros"):
         super().__init__()
-        self.net = CausalConv1d(dim, dim, kernel_size=kernel_size, dilation=dilation, groups=dim)
+        self.net = CausalConv1d(dim, dim, kernel_size=kernel_size, dilation=dilation, groups=dim, pad_mode=pad_mode)
 
     def forward(self, x):
         return self.net(x)
@@ -80,10 +94,11 @@ class CausalConvNeXtBlock(nn.Module):
     """
     1D Causal ConvNeXt Block with Dilation support.
     """
-    def __init__(self, dim=512, intermediate_dim=2048, kernel_size=7, dilation=1, layer_scale_init_value=1e-6):
+    def __init__(self, dim=512, intermediate_dim=2048, kernel_size=7, dilation=1, layer_scale_init_value=1e-6,
+                 pad_mode="zeros"):
         super().__init__()
 
-        self.dwconv = CausalDWConv1d(dim, kernel_size=kernel_size, dilation=dilation)
+        self.dwconv = CausalDWConv1d(dim, kernel_size=kernel_size, dilation=dilation, pad_mode=pad_mode)
         self.norm = LayerNorm1d(dim)
         self.pwconv1 = nn.Conv1d(dim, intermediate_dim, kernel_size=1)
         self.act = nn.GELU()
