@@ -188,13 +188,8 @@ class LatentDecoder1D(nn.Module):
 
 
 # --- Official vocoder as a LatentDecoder1D ----------------------------------------------------
-# The weights are its authors' (BigScience OpenRAIL-M; source and license in the README's
-# "References and acknowledgements").
-# They are never bundled or re-uploaded: `onnx/vocoder.onnx` is downloaded from the official repo
-# at load time and its 103 initializers are mapped 1:1 onto this decoder. Reading the ONNX file
-# needs the `onnx` package (`pip install onnx`), imported lazily so the default install is unchanged.
-# With pad_mode="replicate" (every Pad node in the graph is mode='edge') the port matches
-# onnxruntime to float round-off.
+# OpenRAIL-M weights (see README, "References and acknowledgements"), never bundled: `onnx/vocoder.onnx`
+# is downloaded at load time and mapped 1:1 onto this decoder. Needs `pip install onnx` (imported lazily).
 SUPERTONIC3_REPO = "Supertone/supertonic-3"
 SUPERTONIC3_REVISION = "3cadd1ee6394adea1bd021217a0e650ede09a323"   # vocoder.onnx md5 68e5b768810cb3c2cf7a27f3ce2494e3
 SUPERTONIC3_DECODER_CFG = {

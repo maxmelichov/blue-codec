@@ -51,14 +51,7 @@ class ConvNeXtBlock(nn.Module):
         return residual + x
 
 class CausalConv1d(nn.Conv1d):
-    """Left-padded (causal) Conv1d.
-
-    ``pad_mode`` is the padding applied to the left context:
-      - ``"zeros"`` (default): what the published 1.5M-step BlueCodec decoder was trained with.
-      - ``"replicate"``: what the official ``vocoder.onnx`` does (every Pad node in
-        that graph is ``mode='edge'``). Loading the official weights with zero padding diverges
-        from the graph at the first frames; with replicate the port matches it to float round-off.
-    """
+    """Left-padded (causal) Conv1d. pad_mode: "zeros" (1.5M decoder) or "replicate" (official vocoder)."""
     def __init__(self, in_channels, out_channels, kernel_size, dilation=1, pad_mode="zeros", **kwargs):
         self._pad = (kernel_size - 1) * dilation
         if pad_mode not in ("zeros", "replicate"):
