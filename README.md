@@ -22,6 +22,8 @@ Pretrained weights: [notmax123/blue-codec](https://huggingface.co/notmax123/blue
 
 For detailed instructions on how to train the Autoencoder, please refer to the [Training Documentation](docs/training.md).
 
+The trainer also supports encoder-only training against a frozen decoder and the optional training terms of the E12b model (see the documentation).
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

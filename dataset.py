@@ -38,11 +38,14 @@ class TTSDataset(Dataset):
     randomly cropped to `segment_size` samples when longer.
 
     `data_sources`: one or more directories (scanned recursively) or `|`-separated metadata files.
+    `end_crop_prob`: probability that a crop ends at the clip's true end instead of a random position.
+    `drop_list`: optional text file of audio paths (one per line) to leave out.
     """
 
-    def __init__(self, data_sources, sample_rate=44100, segment_size=None):
+    def __init__(self, data_sources, sample_rate=44100, segment_size=None, end_crop_prob=0.0, drop_list=None):
         self.sample_rate = sample_rate
         self.segment_size = segment_size
+        self.end_crop_prob = end_crop_prob
         self.files = []
         for src in [data_sources] if isinstance(data_sources, str) else data_sources:
             if os.path.isdir(src):
@@ -54,6 +57,12 @@ class TTSDataset(Dataset):
                 continue
             print(f"{src}: {len(found)} audio files")
             self.files += found
+        if drop_list:
+            with open(drop_list, encoding="utf-8") as fh:
+                drop = {line.strip() for line in fh if line.strip()}
+            n = len(self.files)
+            self.files = [f for f in self.files if f not in drop]
+            print(f"{drop_list}: dropped {n - len(self.files)} of {n} files")
         if not self.files:
             raise ValueError("no audio files found")
 
@@ -70,7 +79,9 @@ class TTSDataset(Dataset):
         if sr != self.sample_rate:
             wav = ensure_sr(wav, sr, self.sample_rate).squeeze(0)
         if self.segment_size is not None and wav.shape[0] > self.segment_size:
-            start = random.randint(0, wav.shape[0] - self.segment_size)
+            max_start = wav.shape[0] - self.segment_size
+            at_end = self.end_crop_prob > 0 and random.random() < self.end_crop_prob
+            start = max_start if at_end else random.randint(0, max_start)
             wav = wav[start:start + self.segment_size]
         return wav
 
@@ -79,3 +90,33 @@ def collate_fn(batch):
     """Right-pad with zeros to the longest clip: [B, 1, T]."""
     n = max(w.shape[0] for w in batch)
     return torch.stack([F.pad(w, (0, n - w.shape[0])) for w in batch]).unsqueeze(1)
+
+
+def _edge_length(wav_len, array_len, chunk):
+    """Length of the tail of a clip kept so that it ends within the last `chunk` samples of the array."""
+    hi = min(array_len, wav_len)
+    lo = array_len - chunk + 1
+    if hi < lo:
+        return wav_len                                  # too short: kept whole, silence-padded
+    r = random.random()
+    if r < 0.25:
+        return hi                                       # audio up to the array end
+    if r < 0.5:
+        return random.randint(max(lo, hi - 511), hi)    # within one hop of it
+    return random.randint(lo, hi)
+
+
+def collate_fn_edge(batch, chunk=3072, aligned_prob=0.85, min_frac=0.4):
+    """Edge-aware batches (`--edge_aware`): the array length is a multiple of `chunk` samples.
+
+    With probability `aligned_prob`, an array length Lp (a multiple of `chunk`, between `min_frac` and 1 times the
+    longest clip) is drawn and each clip keeps its last samples so that it ends in the last chunk of the array,
+    the way a single clip ends when it is encoded. Returns (wavs [B, 1, T], lengths [B]).
+    """
+    if random.random() < aligned_prob:
+        longest = max(w.shape[0] for w in batch)
+        Lp = max(chunk, -(-random.randint(int(min_frac * longest), longest) // chunk) * chunk)
+        batch = [w[w.shape[0] - _edge_length(w.shape[0], Lp, chunk):] for w in batch]
+    lengths = torch.tensor([w.shape[0] for w in batch])
+    T = -(-int(lengths.max()) // chunk) * chunk
+    return torch.stack([F.pad(w, (0, T - w.shape[0])) for w in batch]).unsqueeze(1), lengths

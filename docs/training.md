@@ -83,6 +83,39 @@ uv run torchrun --nproc_per_node=2 train_autoencoder.py \
 
 ---
 
+## 🧩 5. E12b Training Terms
+
+E12b is a full autoencoder continued from the 1.5M-step model for 600k steps with four additions to the losses above. Each is an opt-in flag; with none of them set the recipes above are unchanged. E12b weights will be published separately.
+
+| Flag | Meaning |
+|------|---------|
+| `--edge_aware` | Half of the crops end at the clip's true end. Batches are padded to a multiple of 3072 samples (hop 512 × 6) and, 85% of the time, cut so every clip ends in the last 3072-sample chunk, as a single clip does when encoded. The loss is masked per clip beyond `ceil(L / 3072) * 3072`. |
+| `--tail_consistency W` | Relative L2 between each clip's last compressed latent frame and the same frame encoded with two extra chunks of silence (target without gradient). Needs `--edge_aware` and `--tail_stats`. Freezes the encoder BatchNorm unless `--no_bn_freeze`. |
+| `--tail_stats PATH` | Latent stats file (`mean`, `std` over the 144 compressed channels) normalising the tail term. |
+| `--hiband_w W` | L1 of the log-magnitude STFT (n_fft 2048, hop 512) above 12 kHz. |
+| `--floor_w W`, `--floor_db D` | On 1024-sample frames whose source is below `D` dBFS (default −60), penalises decoded level above `D`. |
+| `--drop_list FILE` | Audio paths (one per line) to leave out of training. |
+| `--decoder_pad_mode replicate` | Replicate causal padding in the decoder (E12b); the 1.5M decoder uses zeros. |
+| `--continue_cosine N`, `--lr_warmup K` | With `--resume`: keep the step counter and optimizer state, then a new cosine from `--lr` to 1e-6 over `N` steps after an optional `K`-step linear warm-up. |
+
+E12b's main stage (steps 50k → 600k), resuming from a full training checkpoint:
+
+```bash
+uv run torchrun --nproc_per_node=2 train_autoencoder.py \
+    --resume path/to/ae_checkpoint.pt --batch_size 64 \
+    --recon_logmel_fullband --fm_composite --decoder_pad_mode replicate \
+    --edge_aware --tail_consistency 7.5 --tail_stats path/to/latent_stats.pt \
+    --hiband_w 2.0 --floor_w 10 --drop_list path/to/drop_list.txt \
+    --lr 1.234e-5 --continue_cosine 550000 --total_steps 600000 \
+    --checkpoint_dir checkpoints/ae_e12b
+```
+
+The first 50k steps used a 5k-step warm-up to 1.25e-5 with `--no_bn_freeze`. Details: [technical report §10](../assets/TechnicalReport.md#10-e12b-training-additions).
+
+The trainer falls back to CPU (gloo) when no GPU is visible, which is enough for a smoke test.
+
+---
+
 ## 📊 Model Training Details
 
 The current pretrained model was trained with the following specifications:
