@@ -6,11 +6,11 @@ from safetensors.torch import load_file
 from bluecodec.autoencoder.latent_encoder import LatentEncoder
 from bluecodec.autoencoder.latent_decoder import LatentDecoder1D
 from bluecodec.autoencoder.discriminators import MultiPeriodDiscriminator, MultiResolutionDiscriminator
-from bluecodec.utils import MelSpectrogramNoLog, LinearMelSpectrogram, decompress_latents, encode_wav_edge_padded
+from bluecodec.utils import MelSpectrogramNoLog, LinearMelSpectrogram
 
-# Encoder trained against the frozen official vocoder (Sept 2026). Only the encoder is hosted in
-# notmax123/blue-codec; the decoder is downloaded from its official repo at load time (see README).
-SUPERTONIC3_ENCODER_FILE = "encoder_supertonic3_decoder/encoder.safetensors"
+# Encoder trained against the frozen official vocoder. Only the encoder is hosted in notmax123/blue-codec;
+# the decoder is downloaded from its official repo at load time (see README).
+SUPERTONIC3_ENCODER_FILE = "encoder_supertonic3_decoder_edge_fixed/encoder.safetensors"
 
 
 class BlueCodec(nn.Module):
@@ -43,15 +43,9 @@ class BlueCodec(nn.Module):
         return model
 
     @torch.no_grad()
-    def encode(self, audio, edge_pad_chunks=None):
-        """audio [B, L] at 44.1 kHz -> latents [B, 24, T].
-        edge_pad_chunks=None: original behaviour (T = L // 512 + 1).
-        edge_pad_chunks=2 (recommended for the official-vocoder encoder): pad to a multiple of 3072 samples
-        plus 2 silent chunks and keep T = 6 * ceil(L / 3072), so no kept frame sees the array edge."""
-        if edge_pad_chunks is None:
-            return self.encoder(self.mel_transform(audio))
-        zc, _ = encode_wav_edge_padded(self.encoder, self.mel_transform, audio, factor=6, hop=512, edge_pad_chunks=edge_pad_chunks)
-        return decompress_latents(zc, factor=6, target_channels=24)
+    def encode(self, audio):
+        mel = self.mel_transform(audio)
+        return self.encoder(mel)
 
     @torch.no_grad()
     def decode(self, latents):
