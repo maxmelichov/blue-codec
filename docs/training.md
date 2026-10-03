@@ -56,9 +56,9 @@ uv run train_autoencoder.py
 
 ## 🎯 4. Encoder-Only Training Against a Frozen Decoder (Sept 2026)
 
-This mode trains **only the encoder** (plus the discriminators) against a **frozen decoder**, e.g. the official Supertonic-3 vocoder, loaded 1:1 into `LatentDecoder1D` with replicate ("edge") causal padding. The decoder stays in the graph, so the reconstruction and adversarial gradients flow *through* it into the encoder, which learns to emit the latent space that decoder expects.
+This mode trains **only the encoder** (plus the discriminators) against a **frozen decoder**, e.g. the official vocoder (a frozen pretrained vocoder; see the README's *References and acknowledgements*), loaded 1:1 into `LatentDecoder1D` with replicate ("edge") causal padding. The decoder stays in the graph, so the reconstruction and adversarial gradients flow *through* it into the encoder, which learns to emit the latent space that decoder expects.
 
-The official decoder weights are **not** part of this repository. `--decoder supertonic3` downloads `onnx/vocoder.onnx` from [Supertone/supertonic-3](https://huggingface.co/Supertone/supertonic-3) (OpenRAIL-M) at start-up; reading it needs `pip install onnx`. The command that reproduces the released Supertonic-3-decoder encoder:
+The official decoder weights are **not** part of this repository. `--decoder supertonic3` downloads `onnx/vocoder.onnx` from its official Hugging Face repo (OpenRAIL-M) at start-up; reading it needs `pip install onnx`. The command that reproduces the released official-vocoder encoder:
 
 ```bash
 uv pip install onnx
@@ -67,13 +67,13 @@ uv run torchrun --nproc_per_node=2 train_autoencoder.py \
     --init_encoder path/to/model.safetensors \
     --lr 8.5e-5 --batch_size 64 --total_steps 300000 --d_warmup 10000 \
     --recon_logmel_fullband --fm_composite --lambda_recon 45 \
-    --checkpoint_dir checkpoints/ae_supertonic3
+    --checkpoint_dir checkpoints/ae_official_vocoder
 ```
 
 | Flag | Meaning |
 |------|---------|
 | `--encoder_only` | Decoder frozen (`requires_grad=False`, kept in `eval()` so its BatchNorm statistics never move, not wrapped in DDP, not in any optimizer). `opt_g` holds the encoder only. The decoder is asserted bit-identical at every save. |
-| `--decoder supertonic3` | The official Supertonic-3 vocoder from Hugging Face. A path to an AE `.pt` checkpoint freezes that checkpoint's decoder instead. |
+| `--decoder supertonic3` | The official vocoder from Hugging Face. A path to an AE `.pt` checkpoint freezes that checkpoint's decoder instead. |
 | `--init_encoder` | Encoder initialisation: an AE `.pt` checkpoint or a BlueCodec `.safetensors` (e.g. the Hub `model.safetensors`). Fresh optimizer, step 0. |
 | `--total_steps` | Loop length and cosine `T_max` (lr down to 1e-6). |
 | `--batch_size` | Per-process batch size (overrides `ae.train.batch_size`). |
@@ -82,14 +82,14 @@ uv run torchrun --nproc_per_node=2 train_autoencoder.py \
 | `--fm_composite` | Feature matching averaged over the MPD and MRD layers together (paper Eq. 6). Default: the two averages are summed, an effective λ_fm of 0.2. |
 | `--lambda_recon` | Reconstruction weight (default 45). |
 
-Checkpoints written in `--encoder_only` mode store `decoder_source` instead of the decoder weights, so such a checkpoint can be shared without redistributing Supertone's weights. Resuming with `--resume` restores the encoder, discriminators, optimizers and schedule; the decoder is reloaded from `--decoder`.
+Checkpoints written in `--encoder_only` mode store `decoder_source` instead of the decoder weights, so such a checkpoint can be shared without redistributing the official vocoder's weights. Resuming with `--resume` restores the encoder, discriminators, optimizers and schedule; the decoder is reloaded from `--decoder`.
 
 ### The released run
 
 | Setting | Value |
 |---------|-------|
 | Encoder init | the 1.5M-step encoder (identical to the encoder in the Hub `model.safetensors`); discriminators also from the 1.5M training checkpoint |
-| Decoder | official Supertonic-3 `vocoder.onnx` (md5 `68e5b768…`, Hub revision `3cadd1ee`), frozen |
+| Decoder | official `vocoder.onnx` (md5 `68e5b768…`, Hub revision `3cadd1ee`), frozen |
 | Optimizer | AdamW (β = 0.8, 0.99, wd 0.01), fresh state |
 | LR | 8.5e-5, cosine to 1e-6 over 300k steps |
 | Batch | 2 GPUs × 64 segments of 61,740 samples (1.4 s) |

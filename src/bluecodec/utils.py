@@ -47,11 +47,11 @@ def encode_wav_edge_padded(encoder, spec, wav: torch.Tensor, factor: int = 6, ho
 
     wav: [B, L] (one length; for a batch of different lengths, pad each clip the same way).
     Returns (z [B, 24*factor, Tc], Tc) with Tc = ceil(L / (hop*factor)) -- the official
-    Supertonic helper's latent length. No frame past the audio end is ever returned, and none
+    vocoder helper's latent length. No frame past the audio end is ever returned, and none
     is replicated by compress_latents.
 
     Why (Sept 2026, see assets/TechnicalReport.md sec. 11): the encoder is non-causal with zero
-    conv padding. The encoder trained against the frozen causal Supertonic-3 vocoder on fixed
+    conv padding. The encoder trained against the frozen causal official vocoder on fixed
     61,740-sample segments learned to write an "edge code" into the last ~3 raw frames whenever the
     array ends right after audio (last compressed frame ~9x the clip's median norm, vs ~1.5x for
     the 1.5M encoder). Appending `edge_pad_chunks` whole chunks of silence moves the edge out of

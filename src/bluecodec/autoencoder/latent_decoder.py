@@ -69,7 +69,7 @@ class LatentDecoder1D(nn.Module):
         intermediate_dim = cfg['intermediate_dim']
         kernel_size = cfg['ksz']
         dilations = cfg['dilation_lst']
-        # "zeros" = the published 1.5M-step decoder; "replicate" = the official Supertonic-3 vocoder
+        # "zeros" = the published 1.5M-step decoder; "replicate" = the official vocoder
         pad_mode = cfg.get('pad_mode', 'zeros')
 
         self.input_channels = in_channels
@@ -187,8 +187,9 @@ class LatentDecoder1D(nn.Module):
         return waveform
 
 
-# --- Official Supertonic-3 vocoder as a LatentDecoder1D ---------------------------------------
-# The weights are Supertone Inc.'s (BigScience OpenRAIL-M, Hugging Face Supertone/supertonic-3).
+# --- Official vocoder as a LatentDecoder1D ----------------------------------------------------
+# The weights are its authors' (BigScience OpenRAIL-M; source and license in the README's
+# "References and acknowledgements").
 # They are never bundled or re-uploaded: `onnx/vocoder.onnx` is downloaded from the official repo
 # at load time and its 103 initializers are mapped 1:1 onto this decoder. Reading the ONNX file
 # needs the `onnx` package (`pip install onnx`), imported lazily so the default install is unchanged.
@@ -217,7 +218,7 @@ def supertonic3_decoder_state(reference_sd, onnx_path=None):
         import onnx
         from onnx import numpy_helper
     except ImportError as e:
-        raise ImportError("Loading the Supertonic-3 decoder reads its ONNX file: pip install onnx") from e
+        raise ImportError("Loading the official vocoder reads its ONNX file: pip install onnx") from e
     if onnx_path is None:
         from huggingface_hub import hf_hub_download
         onnx_path = hf_hub_download(SUPERTONIC3_REPO, "onnx/vocoder.onnx", revision=SUPERTONIC3_REVISION)
@@ -229,12 +230,12 @@ def supertonic3_decoder_state(reference_sd, onnx_path=None):
             sd[n] = v.reshape(reference_sd[n].shape)
     sd["final_norm.norm.num_batches_tracked"] = reference_sd["final_norm.norm.num_batches_tracked"]
     if set(sd) != set(reference_sd):
-        raise RuntimeError(f"Supertonic-3 vocoder mapping mismatch: {sorted(set(sd) ^ set(reference_sd))}")
+        raise RuntimeError(f"Official vocoder mapping mismatch: {sorted(set(sd) ^ set(reference_sd))}")
     return sd, off["tts.ae.latent_mean"], off["tts.ae.latent_std"], float(off["tts.ttl.normalizer.scale"])
 
 
 def load_supertonic3_decoder(device="cpu", freeze=True, onnx_path=None):
-    """LatentDecoder1D holding the official Supertonic-3 vocoder (frozen, eval, raw [B, 24, T] input)."""
+    """LatentDecoder1D holding the official vocoder (frozen, eval, raw [B, 24, T] input)."""
     dec = LatentDecoder1D(cfg=dict(SUPERTONIC3_DECODER_CFG))
     dec.load_state_dict(supertonic3_decoder_state(dec.state_dict(), onnx_path)[0], strict=True)
     dec.to(device).eval()

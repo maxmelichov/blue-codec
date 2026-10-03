@@ -8,8 +8,8 @@ from bluecodec.autoencoder.latent_decoder import LatentDecoder1D
 from bluecodec.autoencoder.discriminators import MultiPeriodDiscriminator, MultiResolutionDiscriminator
 from bluecodec.utils import MelSpectrogramNoLog, LinearMelSpectrogram, decompress_latents, encode_wav_edge_padded
 
-# Encoder trained against the frozen official Supertonic-3 vocoder (Sept 2026). Only the encoder is
-# hosted in notmax123/blue-codec; the decoder is downloaded from Supertone/supertonic-3 at load time.
+# Encoder trained against the frozen official vocoder (Sept 2026). Only the encoder is hosted in
+# notmax123/blue-codec; the decoder is downloaded from its official repo at load time (see README).
 SUPERTONIC3_ENCODER_FILE = "encoder_supertonic3_decoder/encoder.safetensors"
 
 
@@ -23,8 +23,8 @@ class BlueCodec(nn.Module):
     @classmethod
     def from_pretrained(cls, repo_id="notmax123/blue-codec", filename="model.safetensors", device="cpu", decoder=None):
         """decoder=None: encoder + decoder from `filename` (the 1.5M-step model).
-        decoder="supertonic3": our encoder trained for the official Supertonic-3 vocoder, plus that vocoder,
-        downloaded from Supertone/supertonic-3 (OpenRAIL-M, not redistributed here; needs `pip install onnx`)."""
+        decoder="supertonic3": our encoder trained for the official vocoder, plus that vocoder,
+        downloaded from its official repo (OpenRAIL-M, not redistributed here; needs `pip install onnx`)."""
         if decoder is None:
             model = cls()
             sd = load_file(hf_hub_download(repo_id=repo_id, filename=filename), device=device)
@@ -46,7 +46,7 @@ class BlueCodec(nn.Module):
     def encode(self, audio, edge_pad_chunks=None):
         """audio [B, L] at 44.1 kHz -> latents [B, 24, T].
         edge_pad_chunks=None: original behaviour (T = L // 512 + 1).
-        edge_pad_chunks=2 (recommended for the Supertonic-3-decoder encoder): pad to a multiple of 3072 samples
+        edge_pad_chunks=2 (recommended for the official-vocoder encoder): pad to a multiple of 3072 samples
         plus 2 silent chunks and keep T = 6 * ceil(L / 3072), so no kept frame sees the array edge."""
         if edge_pad_chunks is None:
             return self.encoder(self.mel_transform(audio))

@@ -224,7 +224,7 @@ def save_checkpoint(step, epoch, encoder, decoder, mpd, mrd, opt_g, opt_d, sched
         "opt_g": opt_g.state_dict(), "opt_d": opt_d.state_dict(),
         "scheduler_g": scheduler_g.state_dict(), "scheduler_d": scheduler_d.state_dict(),
     }
-    # A frozen third-party decoder (e.g. the official Supertonic-3 vocoder) is not written into the
+    # A frozen third-party decoder (e.g. the official vocoder) is not written into the
     # checkpoint, so sharing an encoder-only checkpoint never redistributes those weights.
     if decoder_source is None: state["decoder"] = _mod(decoder).state_dict()
     else: state["decoder_source"] = decoder_source
@@ -275,9 +275,9 @@ def main():
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints/ae')
     parser.add_argument('--total_steps', type=int, default=1500000, help='Loop length and cosine T_max')
     parser.add_argument('--batch_size', type=int, default=None, help='Per-process batch size (overrides ae.train.batch_size)')
-    # --- Encoder-only training against a frozen decoder (e.g. the official Supertonic-3 vocoder) ---
+    # --- Encoder-only training against a frozen decoder (e.g. the official vocoder) ---
     parser.add_argument('--encoder_only', action='store_true', help='Freeze the decoder (from --decoder) and train the encoder + discriminators')
-    parser.add_argument('--decoder', type=str, default=None, help='"supertonic3" = official Supertonic-3 vocoder from Hugging Face, or an AE .pt checkpoint')
+    parser.add_argument('--decoder', type=str, default=None, help='"supertonic3" = the official vocoder from Hugging Face, or an AE .pt checkpoint')
     parser.add_argument('--init_encoder', type=str, default=None, help='Encoder init: AE .pt checkpoint or BlueCodec .safetensors (fresh optimizer, step 0)')
     parser.add_argument('--d_warmup', type=int, default=0, help='Discriminators frozen, reconstruction-only loss for the first N steps')
     # --- Paper losses (defaults reproduce the 1.5M-step recipe) ---
@@ -316,9 +316,9 @@ def main():
         # The decoder is frozen BEFORE (and instead of) DDP wrapping; it has nothing to sync.
         if args.decoder == "supertonic3":
             from bluecodec.autoencoder.latent_decoder import load_supertonic3_decoder
-            decoder = load_supertonic3_decoder(device=device)   # downloaded from Supertone/supertonic-3, replicate padding
+            decoder = load_supertonic3_decoder(device=device)   # downloaded from its official repo, replicate padding
             decoder_source = "supertonic3"
-            if args.local_rank == 0: logger.info("[encoder_only] decoder <- official Supertonic-3 vocoder.onnx (Hugging Face), frozen")
+            if args.local_rank == 0: logger.info("[encoder_only] decoder <- official vocoder.onnx (Hugging Face), frozen")
         else:
             decoder = LatentDecoder1D(cfg=ae_cfg['decoder']).to(device)
             decoder.load_state_dict(torch.load(args.decoder, map_location=device)['decoder'])
