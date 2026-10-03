@@ -34,7 +34,7 @@ At 44 100 Hz with `hop_length = 512`, each latent frame corresponds to exactly 5
 |---|---|
 | `LayerNorm1d` | Channel-wise LayerNorm for `[B, C, T]` tensors (transposes before/after). |
 | `ConvNeXtBlock` | Standard (non-causal) 1-D ConvNeXt block with dilation and layer-scale γ. Used in the encoder and `StyleTTS2Vocoder`. |
-| `CausalConv1d` | `nn.Conv1d` with left-only padding — strictly causal, no future context. |
+| `CausalConv1d` | `nn.Conv1d` with left-only padding — strictly causal, no future context. `pad_mode` `"zeros"` (default, the 1.5M decoder) or `"replicate"` (E12b). |
 | `CausalDWConv1d` | Thin wrapper around `CausalConv1d` for depthwise use; exposes weight at `dwconv.net.*` to match ONNX trace paths. |
 | `CausalConvNeXtBlock` | Causal variant of `ConvNeXtBlock`; uses `CausalDWConv1d` for the depthwise step. Used in the decoder. |
 
@@ -78,6 +78,7 @@ Causal decoder that reconstructs waveform from latents. Accepts both raw latents
 | `dilation_lst` | `[1,2,4,1,2,4,1,1,1,1]` | Dilation per block |
 | `chunk_compress_factor` | 6 | Compression ratio used by TTL |
 | `normalizer_scale` | 1.0 | Scale applied during decompression |
+| `pad_mode` | `"zeros"` | Causal padding of every `CausalConv1d` (`"replicate"` for E12b) |
 | `head.idim` | 512 | Head input dim (must equal `hdim`) |
 | `head.hdim` | 2048 | Head intermediate dim |
 | `head.odim` | 512 | Head output channels (= samples per frame) |

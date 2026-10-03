@@ -7,9 +7,9 @@ from .modules import CausalConv1d, CausalConvNeXtBlock
 
 
 class CausalInputProjection(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size):
+    def __init__(self, in_channels, out_channels, kernel_size, pad_mode="zeros"):
         super().__init__()
-        self.net = CausalConv1d(in_channels, out_channels, kernel_size=kernel_size)
+        self.net = CausalConv1d(in_channels, out_channels, kernel_size=kernel_size, pad_mode=pad_mode)
 
     def forward(self, x):
         return self.net(x)
@@ -25,11 +25,11 @@ class FinalBatchNorm1d(nn.Module):
 
 
 class VocoderHead(nn.Module):
-    def __init__(self, dim=512, hdim=2048, out_dim=512, kernel_size=3):
+    def __init__(self, dim=512, hdim=2048, out_dim=512, kernel_size=3, pad_mode="zeros"):
         super().__init__()
         # Match the AE decoder head config:
         # layer1 causal conv -> PReLU -> layer2 1x1 conv -> transpose -> reshape.
-        self.layer1 = CausalInputProjection(dim, hdim, kernel_size=kernel_size)
+        self.layer1 = CausalInputProjection(dim, hdim, kernel_size=kernel_size, pad_mode=pad_mode)
         self.act = nn.PReLU()
         self.layer2 = nn.Conv1d(hdim, out_dim, kernel_size=1, bias=False)
 
@@ -69,6 +69,7 @@ class LatentDecoder1D(nn.Module):
         intermediate_dim = cfg['intermediate_dim']
         kernel_size = cfg['ksz']
         dilations = cfg['dilation_lst']
+        pad_mode = cfg.get('pad_mode', 'zeros')   # causal padding: zeros (1.5M decoder) or replicate (E12b)
 
         self.input_channels = in_channels
         self.chunk_compress_factor = int(cfg.get('chunk_compress_factor', 1))
@@ -81,14 +82,15 @@ class LatentDecoder1D(nn.Module):
         self.register_buffer('latent_mean', torch.zeros(1, in_channels, 1), persistent=False)
         self.register_buffer('latent_std', torch.ones(1, in_channels, 1), persistent=False)
 
-        self.embed = CausalInputProjection(in_channels, dim, kernel_size=kernel_size)
+        self.embed = CausalInputProjection(in_channels, dim, kernel_size=kernel_size, pad_mode=pad_mode)
 
         self.convnext = nn.ModuleList([
             CausalConvNeXtBlock(
                 dim=dim, 
                 intermediate_dim=intermediate_dim, 
                 kernel_size=kernel_size, 
-                dilation=d
+                dilation=d,
+                pad_mode=pad_mode,
             )
             for d in dilations
         ])
@@ -107,6 +109,7 @@ class LatentDecoder1D(nn.Module):
             hdim=head_cfg['hdim'],
             out_dim=head_cfg['odim'],
             kernel_size=int(head_cfg.get('ksz', 3)),
+            pad_mode=pad_mode,
         )
 
     def _prepare_latents(self, x):
