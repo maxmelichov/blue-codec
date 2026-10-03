@@ -349,9 +349,44 @@ A text-to-latent model trained on this encoder's targets, encoded as a batch, le
 
 ---
 
-## 12. Edge-Fixed Encoder (in progress, Sept 2026)
+## 12. Edge-Fixed Encoder (Sept 2026)
 
-A retrain of the Supertonic-3-decoder encoder that is aware of the array edge (the "edge-fixed encoder") is in progress, to remove the edge code at the source instead of by padding. This section, the training recipe in `docs/training.md` and the Hub weights slot `encoder_supertonic3_decoder_edge_fixed/` will be filled in when it finishes. Until then, use the current encoder with edge-padded encoding.
+The edge-fixed encoder (`encoder_supertonic3_decoder_edge_fixed/encoder.safetensors` on the Hub) removes the edge code at the source instead of by padding.
+
+### 12.1 Recipe
+
+The §10 encoder (`ae_290000.pt`) continued against the same frozen official vocoder, with encoder, discriminators and AdamW moments carried over:
+
+| Steps | lr | Additions |
+|-------|----|-----------|
+| 290k → 300k | 2×10⁻⁵, 1k warm-up, cosine | **edge-aware batches**: variable-length segments, half ending at the clip's true end; 85% of batches cut so every row ends within one 3072-sample chunk of a shared, 3072-aligned array end (a quarter exactly at it, a quarter within 512 samples); loss masked per clip at `ceil(L/3072)·3072`; latents in the official layout |
+| 300k → 310k | same | + **tail consistency** (weight 15, last 3 raw frames); encoder BatchNorm frozen |
+| 310k → 350k | 2×10⁻⁵, 1k warm-up, cosine over 40k | tail consistency as the relative L2 of each clip's **last compressed frame** (all 6 sub-frames, normalised with the 290k encoder's latent stats) against an encoding of the same clip with 2 extra chunks of silence (no gradient), weight 7.5 |
+
+The tail term is needed because the frozen decoder renders the edge code as faithfully as a true latent, so reconstruction and adversarial losses give almost no gradient against it. These terms were run with BlueTTS's trainer and are not flags of this repository's `train_autoencoder.py`.
+
+### 12.2 Results
+
+Round trip on the §10.3 clips, official layout (`encode(audio, edge_pad_chunks=0)`; bare and `edge_pad_chunks=2` give the same numbers to ±0.001):
+
+| Codec | front-end L1 | front-end L1 >8k | mel228 L1 | 12–22 kHz vs source | DNSMOS |
+|-------|------:|------:|------:|------:|------:|
+| Supertonic-3-decoder encoder (290k, §10.3, bare) | 0.3385 | 0.2251 | 0.8944 | +7.63 dB | 3.42 |
+| **Edge-fixed encoder (350k)** | 0.3387 | **0.2233** | **0.8839** | **+7.11 dB** | **3.44** |
+
+End of clip, measured as in §11.3 on the same 50 mixed clips (each encoder normalised with its own latent stats):
+
+| Encoding | 290k: last / median | 290k: last frame vs edge-free (mean / max) | edge-fixed: last / median | edge-fixed: vs edge-free (mean / max) |
+|---|---:|---:|---:|---:|
+| official layout (pad to 3072) | 1.76× | 99% / 363% | **1.36×** | **5.3% / 33%** (40/50 within 10%) |
+| edge-padded, 2 chunks | 1.36× | 2.3% / 4.2% | 1.37× | 0.5% / 0.9% |
+| edge-free reference | 1.38× | 0 | 1.37× | 0 |
+
+On the 10 references alone the official layout gives 1.44× (edge-free 1.45×), 8/10 within 10%. With the official layout the end-of-clip spike is gone; the clips still outside 10% are ones whose audio runs to the very end of the array. Edge-padded encoding remains the closest to edge-free and costs nothing, so it is still recommended for latents that feed another model.
+
+### 12.3 Downstream caveat
+
+The edge-fixed encoder's latents are in the Supertonic-3 latent space but are not the 290k encoder's: stats files, text-to-latent and duration checkpoints and exported voices built on one are invalid with the other (§10.4 applies).
 
 ---
 

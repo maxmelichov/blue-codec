@@ -103,9 +103,9 @@ When starting from the Hub `model.safetensors`, the discriminators start from sc
 
 **After training an encoder, recompute the latent statistics** with the new encoder, and use edge-padded encoding (`BlueCodec.encode(..., edge_pad_chunks=2)` / `bluecodec.utils.encode_wav_edge_padded`) for anything a downstream model will see. See the README's *Latent conventions* section.
 
-### Edge-fixed encoder (in progress)
+### Edge-fixed encoder
 
-A retrain of this encoder that is aware of the array edge (the "edge-fixed encoder") is running, to remove the end-of-clip edge code at the source rather than by padding. Its recipe and results will be added here when it finishes; its weights slot on the Hub is `encoder_supertonic3_decoder_edge_fixed/`.
+The edge-fixed encoder (Hub `encoder_supertonic3_decoder_edge_fixed/`) removes the end-of-clip edge code at the source rather than by padding. It is the released `ae_290000.pt` continued for 60k steps (to 350k) against the same frozen vocoder, with encoder, discriminators and optimizer moments carried over, AdamW lr 2e-5 with a 1k-step warm-up and cosine decay, and two additions: edge-aware batches (variable-length segments, half ending at the clip's true end, batches padded to a multiple of 3072 samples, loss masked per clip at `ceil(L/3072) * 3072`) and, from step 300k, a tail-consistency loss with the encoder's BatchNorm frozen (relative L2 between each clip's last compressed latent frame and an encoding of the same clip with 2 extra chunks of silence; weight 7.5 from step 310k). These two terms were run with BlueTTS's trainer and are not flags of `train_autoencoder.py` here. Results: [technical report §12](../assets/TechnicalReport.md#12-edge-fixed-encoder-sept-2026).
 
 ---
 

@@ -35,7 +35,7 @@ The encoder is non-causal with zero convolution padding, so the last few latent 
 |-------|------|---------|---------|-----------|
 | **BlueCodec 1.5M** | `model.safetensors` | 1.5M steps | ours, 1.5M steps | `BlueCodec.from_pretrained("notmax123/blue-codec")` |
 | **Supertonic-3-decoder encoder** (Sept 2026) | `encoder_supertonic3_decoder/encoder.safetensors` (+ `ae_290000.pt`, decoder-free training checkpoint) | 1.5M encoder + 290k steps against the frozen Supertonic-3 vocoder | **official Supertonic-3 vocoder**, downloaded from [Supertone/supertonic-3](https://huggingface.co/Supertone/supertonic-3) at load time, never redistributed here | `BlueCodec.from_pretrained("notmax123/blue-codec", decoder="supertonic3")` |
-| **Edge-fixed encoder** | *reserved: `encoder_supertonic3_decoder_edge_fixed/` — retrain in progress, not released* | — | official Supertonic-3 vocoder | — |
+| **Edge-fixed encoder** (Sept 2026) | `encoder_supertonic3_decoder_edge_fixed/encoder.safetensors` | Supertonic-3-decoder encoder + 60k edge-aware steps (350k); no edge code with the official layout (`edge_pad_chunks=0`) | **official Supertonic-3 vocoder**, downloaded at load time | `BlueCodec.from_pretrained("notmax123/blue-codec", decoder="supertonic3", filename="encoder_supertonic3_decoder_edge_fixed/encoder.safetensors")` |
 
 The 1.5M model was trained on 2x NVIDIA RTX 3090 GPUs for 4 weeks for 1.5 million steps on 6 million files with different languages, totaling about 11,000 hours of audio.
 
@@ -45,7 +45,8 @@ The Supertonic-3-decoder encoder keeps our encoder architecture and front end bu
 |-------|------------:|--------------------:|-------:|
 | BlueCodec 1.5M (`model.safetensors`) | 0.4426 | +19.56 dB | 3.40 |
 | 1.5M encoder + retrained decoder (not published) | 0.3604 | +1.50 dB | 3.41 |
-| **Supertonic-3-decoder encoder** + official vocoder | **0.3385** | +7.63 dB | **3.42** |
+| **Supertonic-3-decoder encoder** + official vocoder | **0.3385** | +7.63 dB | 3.42 |
+| **Edge-fixed encoder** + official vocoder (official layout) | 0.3387 | +7.11 dB | **3.44** |
 
 \* L1 of the log of the encoder's input features (see the report); on a plain 228-band log-mel L1 the retrained-decoder row is best.
 
