@@ -6,6 +6,7 @@ import atexit
 import argparse
 import random
 import logging
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -20,12 +21,14 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 import torch.distributed as dist
 
-from dataset import TTSDataset, collate_fn
+from dataset import TTSDataset, collate_fn, collate_fn_edge
 from bluecodec.audio_utils import ensure_sr
 from bluecodec.autoencoder.latent_encoder import LatentEncoder
 from bluecodec.autoencoder.latent_decoder import LatentDecoder1D
 from bluecodec.autoencoder.discriminators import MultiPeriodDiscriminator, MultiResolutionDiscriminator
-from bluecodec.utils import MelSpectrogramNoLog, LinearMelSpectrogram
+from bluecodec.utils import MelSpectrogramNoLog, LinearMelSpectrogram, compress_latents
+
+HOP, CHUNK = 512, 3072   # latent hop; edge-aware layout: hop x compression 6
 
 def _mod(m): return m.module if isinstance(m, DDP) else m
 
@@ -101,30 +104,92 @@ def get_mel_transforms(data_cfg, device, logmel_fullband=False):
     return [MelSpectrogramNoLog(data_cfg['sample_rate'], n_fft, hop, win, n_mels).to(device)
             for (n_fft, hop, win, n_mels) in mel_configs]
 
+def chunk_ceil(n): return (n + CHUNK - 1) // CHUNK * CHUNK
+
+@dataclass
+class ExtraTerms:
+    """Optional generator terms; all weights 0 is the default recipe."""
+    tail_w: float = 0.0
+    tail_norm: tuple = None      # (mean, std) [1, 144, 1] of the compressed latents
+    hiband_w: float = 0.0
+    floor_w: float = 0.0
+    floor_db: float = -60.0
+
+def tail_consistency_loss(encoder, mel_transform, audio, z, lengths, tail_norm):
+    """Relative L2 between each clip's last compressed latent frame and the same frame encoded with two extra
+    chunks of silence after the batch (the target, without gradient)."""
+    with torch.no_grad():
+        # the bare module: a DDP forward re-broadcasts buffers in place and would break the first pass's graph
+        z_ref = _mod(encoder)(mel_transform(F.pad(audio.squeeze(1), (0, 2 * CHUNK))))[..., : z.shape[-1]]
+    mean, std = tail_norm
+    last = chunk_ceil(lengths) // CHUNK - 1
+    rows = torch.arange(z.shape[0], device=z.device)
+    a = ((compress_latents(z, 6) - mean) / std)[rows, :, last]
+    b = ((compress_latents(z_ref, 6) - mean) / std)[rows, :, last]
+    return ((a - b).norm(dim=1) / b.norm(dim=1).clamp_min(1e-3)).mean()
+
+def hiband_loss(y_hat, audio, n_fft=2048, min_bin=558):
+    """L1 of the log-magnitude STFT above 12 kHz (bin 558 of 2048 at 44.1 kHz)."""
+    win = torch.hann_window(n_fft, device=audio.device)
+    def logmag(x):
+        S = torch.stft(x.squeeze(1), n_fft=n_fft, hop_length=HOP, window=win, return_complex=True).abs()
+        return torch.log(S[:, min_bin:, :].clamp_min(1e-5))
+    return F.l1_loss(logmag(y_hat), logmag(audio))
+
+def silence_floor_loss(y_hat, audio, floor_db, mask=None, frame=1024):
+    """On frames whose source is below `floor_db` dBFS, the decoded level above `floor_db`, in units of 20 dB."""
+    n = audio.shape[-1] // frame
+    def level_db(x): return 10 * x[..., : n * frame].reshape(x.shape[0], n, frame).pow(2).mean(-1).add(1e-12).log10()
+    silent = (level_db(audio) < floor_db).float()
+    if mask is not None: silent = silent * mask[:, 0, : n * frame : frame]
+    return (torch.relu(level_db(y_hat) - floor_db) * silent).sum() / silent.sum().clamp_min(1.0) / 20.0
+
+def extra_losses(terms, encoder, mel_transform, audio, y_hat, z, lengths, mask):
+    """{name: (weight, loss)} for the enabled ExtraTerms."""
+    out = {}
+    if terms.tail_w > 0: out["tail"] = (terms.tail_w, tail_consistency_loss(encoder, mel_transform, audio, z, lengths, terms.tail_norm))
+    if terms.hiband_w > 0: out["hiband"] = (terms.hiband_w, hiband_loss(y_hat, audio))
+    if terms.floor_w > 0: out["floor"] = (terms.floor_w, silence_floor_loss(y_hat, audio, terms.floor_db, mask))
+    return out
+
+def random_crop(audio, y_hat, crop_len, limit):
+    """The same random crop of both signals, within the first `limit` samples."""
+    if limit <= crop_len: return audio, y_hat
+    start = torch.randint(0, limit - crop_len + 1, (1,)).item()
+    return audio[..., start : start + crop_len], y_hat[..., start : start + crop_len]
+
 def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_transforms_loss, opt_g, opt_d, device, crop_len, logger,
-               update_discriminator=True, lambda_recon=45.0, recon_full_segment=False, fm_composite=False, encoder_only=False, recon_only=False):
-    # recon_only (--d_warmup): D frozen (update_discriminator=False) and no adv/fm terms for the generator.
-    # encoder_only: the decoder is frozen (requires_grad False, eval) but stays in the graph,
-    # so the reconstruction gradient flows THROUGH it into the encoder.
+               update_discriminator=True, lambda_recon=45.0, recon_full_segment=False, fm_composite=False, encoder_only=False, recon_only=False,
+               terms=None):
+    # recon_only: no adversarial or feature-matching terms for the generator.
+    # encoder_only: the frozen decoder stays in the graph, so gradients reach the encoder through it.
     lambda_adv, lambda_fm = 1.0, 0.1
+    batch, lengths = batch if isinstance(batch, (tuple, list)) else (batch, None)   # lengths: edge-aware batches
     audio = batch.to(device)
     if audio.dim() == 2: audio = audio.unsqueeze(1) 
 
     with torch.no_grad():
         mel = mel_transform_input(audio.squeeze(1))
     
-    y_hat = decoder(encoder(mel))
+    z = encoder(mel)
+    mask = None
+    if lengths is not None:
+        # Keep the array's own frames (the centred STFT adds one) and supervise each clip up to ceil(L / 3072) * 3072.
+        lengths = lengths.to(device)
+        supervised = chunk_ceil(lengths)
+        z = z[..., : audio.shape[-1] // HOP]
+        mask = (torch.arange(audio.shape[-1], device=device)[None] < supervised[:, None]).float().unsqueeze(1)
+    y_hat = decoder(z)
     if y_hat.dim() == 2: y_hat = y_hat.unsqueeze(1)
     
     if y_hat.shape[-1] != audio.shape[-1]:
         min_len = min(y_hat.shape[-1], audio.shape[-1])
         y_hat, audio = y_hat[..., :min_len], audio[..., :min_len]
-
-    if audio.shape[-1] > crop_len:
-        start_idx = torch.randint(0, audio.shape[-1] - crop_len + 1, (1,)).item()
-        audio_crop, y_hat_crop = audio[..., start_idx : start_idx + crop_len], y_hat[..., start_idx : start_idx + crop_len]
-    else:
-        audio_crop, y_hat_crop = audio, y_hat
+    crop_limit = audio.shape[-1]
+    if mask is not None:
+        y_hat, audio = y_hat * mask, audio * mask
+        if int(supervised.min()) > crop_len: crop_limit = int(supervised.min())   # D never sees the masked zeros
+    audio_crop, y_hat_crop = random_crop(audio, y_hat, crop_len, crop_limit)
 
     loss_d_total = 0.0
     if update_discriminator:
@@ -132,7 +197,7 @@ def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_trans
         y_df_hat_r, y_df_hat_g, _, _ = mpd(audio_crop, y_hat_detached)
         y_ds_hat_r, y_ds_hat_g, _, _ = mrd(audio_crop, y_hat_detached)
         loss_d_total = discriminator_loss(y_df_hat_r, y_df_hat_g) + discriminator_loss(y_ds_hat_r, y_ds_hat_g)
-        if check_for_nan_inf(loss_d_total, "Discriminator Loss", logger): return None, None, None
+        if check_for_nan_inf(loss_d_total, "Discriminator Loss", logger): return None
         opt_d.zero_grad()
         loss_d_total.backward()
         torch.nn.utils.clip_grad_norm_(mpd.parameters(), 1.0)
@@ -140,10 +205,9 @@ def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_trans
         opt_d.step()
         loss_d_total = loss_d_total.item()
 
-    # Reconstruction: on the 0.19 s crop by default; with recon_full_segment on the whole segment
-    # (paper sec. 4.2 specifies the crop for the ADVERSARIAL terms only).
-    _ra, _rf = (audio, y_hat) if recon_full_segment else (audio_crop, y_hat_crop)
-    L_recon = sum(F.l1_loss(tf(_ra.squeeze(1)), tf(_rf.squeeze(1))) for tf in mel_transforms_loss)
+    # Reconstruction on the adversarial crop, or on the whole segment with recon_full_segment.
+    rec_real, rec_fake = (audio, y_hat) if recon_full_segment else (audio_crop, y_hat_crop)
+    L_recon = sum(F.l1_loss(tf(rec_real.squeeze(1)), tf(rec_fake.squeeze(1))) for tf in mel_transforms_loss)
     L_recon = L_recon / len(mel_transforms_loss) if mel_transforms_loss else L_recon
 
     if not recon_only:
@@ -155,14 +219,43 @@ def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_trans
         loss_g_total = (lambda_recon * L_recon) + (lambda_adv * L_adv) + (lambda_fm * L_fm)
     else:
         loss_g_total = lambda_recon * L_recon
+    extras = extra_losses(terms or ExtraTerms(), encoder, mel_transform_input, audio, y_hat, z, lengths, mask)
+    for w, loss in extras.values(): loss_g_total = loss_g_total + w * loss
     
-    if check_for_nan_inf(loss_g_total, "Generator Loss", logger): return None, None, None
+    if check_for_nan_inf(loss_g_total, "Generator Loss", logger): return None
     opt_g.zero_grad()
     loss_g_total.backward()
     torch.nn.utils.clip_grad_norm_(encoder.parameters(), 5.0)
     if not encoder_only: torch.nn.utils.clip_grad_norm_(decoder.parameters(), 5.0)
     opt_g.step()
-    return loss_g_total.item(), loss_d_total, L_recon.item()
+    return loss_g_total.item(), loss_d_total, L_recon.item(), {k: loss.item() for k, (_, loss) in extras.items()}
+
+def freeze_batchnorm(model):
+    """BatchNorm layers in eval mode (running statistics used and not updated)."""
+    for m in _mod(model).modules():
+        if isinstance(m, nn.BatchNorm1d): m.eval()
+
+def load_frozen_decoder(path, cfg, device):
+    decoder = LatentDecoder1D(cfg=cfg).to(device)
+    decoder.load_state_dict(torch.load(path, map_location=device)['decoder'])
+    decoder.requires_grad_(False); decoder.eval()
+    return decoder
+
+def make_scheduler(opt, t_max, warmup=0):
+    """Cosine decay to 1e-6 over `t_max` steps, after an optional linear warm-up from 1% of the lr."""
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=t_max, eta_min=1e-6)
+    if not warmup: return cosine
+    linear = torch.optim.lr_scheduler.LinearLR(opt, start_factor=0.01, end_factor=1.0, total_iters=warmup)
+    return torch.optim.lr_scheduler.SequentialLR(opt, [linear, cosine], milestones=[warmup])
+
+def init_distributed(local_rank):
+    """NCCL on the local GPU, or gloo on CPU when no GPU is visible. Returns (device, DDP device_ids)."""
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend='nccl', init_method='env://')
+        return torch.device(f'cuda:{local_rank}'), [local_rank]
+    dist.init_process_group(backend='gloo', init_method='env://')
+    return torch.device('cpu'), None
 
 def evaluate(encoder, decoder, mel_transform, input_wav_path, output_dir, step, device, target_sr, rank, keep_decoder_eval=False):
     if rank != 0: return
@@ -214,6 +307,7 @@ def load_checkpoint(args, encoder, decoder, mpd, mrd, opt_g, opt_d, scheduler_g,
             if 'scheduler_g' in ckpt: scheduler_g.load_state_dict(ckpt['scheduler_g'])
             if 'scheduler_d' in ckpt: scheduler_d.load_state_dict(ckpt['scheduler_d'])
             return ckpt['step'] + 1, ckpt.get('epoch', 0)
+        if args.local_rank == 0: logger.warning("Optimizer state does not match the model: fresh optimizer, step 0")
     return 0, 0
 
 def save_checkpoint(step, epoch, encoder, decoder, mpd, mrd, opt_g, opt_d, scheduler_g, scheduler_d, logger, ckpt_dir="checkpoints/ae", decoder_source=None):
@@ -264,14 +358,14 @@ def start_tensorboard(logdir="checkpoints/ae/logs"):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--resume', type=str, default=None)
-    parser.add_argument('--eval_input', type=str, default=None)
-    parser.add_argument('--arch_config', type=str, default='config/tts.json')
+    parser.add_argument('--resume', type=str, default=None, help='Training checkpoint (.pt) to resume from')
+    parser.add_argument('--eval_input', type=str, default=None, help='Audio file reconstructed into <checkpoint_dir>/eval at every save')
+    parser.add_argument('--arch_config', type=str, default='config/tts.json', help='Model and data config')
     parser.add_argument('--local-rank', type=int, default=0)
     parser.add_argument('--seed', type=int, default=1234)
-    parser.add_argument('--finetune', action='store_true')
-    parser.add_argument('--lr', type=float, default=None)
-    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints/ae')
+    parser.add_argument('--finetune', action='store_true', help='With --resume: load the weights only (fresh optimizer and schedule, step 0)')
+    parser.add_argument('--lr', type=float, default=None, help='Peak learning rate (overrides ae.train.lr)')
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints/ae', help='Checkpoints, logs and eval audio')
     parser.add_argument('--total_steps', type=int, default=1500000, help='Loop length and cosine T_max')
     parser.add_argument('--batch_size', type=int, default=None, help='Per-process batch size (overrides ae.train.batch_size)')
     # --- Encoder-only training against a frozen decoder ---
@@ -282,21 +376,43 @@ def main():
     # --- Paper losses (defaults reproduce the 1.5M-step recipe) ---
     parser.add_argument('--recon_logmel_fullband', action='store_true', help='Reconstruction on LOG mel up to sr/2 over the whole segment')
     parser.add_argument('--fm_composite', action='store_true', help='Feature matching averaged over MPD+MRD layers together (paper Eq. 6)')
+    # --- E12b additions (all off by default) ---
+    parser.add_argument('--edge_aware', action='store_true',
+                        help='Half of the crops end at the clip end; batches padded to a multiple of 3072 samples and cut so clips end '
+                             'in the last chunk; loss masked per clip beyond ceil(L/3072)*3072')
+    parser.add_argument('--tail_consistency', type=float, default=0.0,
+                        help='Weight of the last-latent-frame consistency term (needs --edge_aware and --tail_stats; freezes the encoder BatchNorm)')
+    parser.add_argument('--tail_stats', type=str, default=None, help='Latent stats file (mean/std over 144 compressed channels) normalising the tail term')
+    parser.add_argument('--no_bn_freeze', action='store_true', help='Keep the encoder BatchNorm in train mode with --tail_consistency')
+    parser.add_argument('--hiband_w', type=float, default=0.0, help='Weight of the 12-22 kHz log-magnitude STFT L1')
+    parser.add_argument('--floor_w', type=float, default=0.0, help='Weight of the silence-floor term (source frames below --floor_db must decode below it)')
+    parser.add_argument('--floor_db', type=float, default=-60.0, help='Silence floor in dBFS for --floor_w')
+    parser.add_argument('--drop_list', type=str, default=None, help='Text file of audio paths (one per line) to leave out')
+    parser.add_argument('--decoder_pad_mode', choices=['zeros', 'replicate'], default=None,
+                        help='Causal padding of the decoder (default: the config, zeros; E12b uses replicate)')
+    parser.add_argument('--continue_cosine', type=int, default=None,
+                        help='With --resume: keep the step counter and optimizer state, restart the cosine from --lr over N steps')
+    parser.add_argument('--lr_warmup', type=int, default=0, help='With --continue_cosine: linear warm-up steps from 1%% of --lr')
     args = parser.parse_args()
     if args.encoder_only and not args.decoder:
         raise SystemExit("--encoder_only needs --decoder (an AE .pt checkpoint)")
+    if args.tail_consistency > 0 and not (args.edge_aware and args.tail_stats):
+        raise SystemExit("--tail_consistency needs --edge_aware and --tail_stats")
+    if args.continue_cosine and not args.resume:
+        raise SystemExit("--continue_cosine needs --resume")
+    if args.lr_warmup and not args.continue_cosine:
+        raise SystemExit("--lr_warmup needs --continue_cosine")
+    freeze_bn = args.tail_consistency > 0 and not args.no_bn_freeze
     ckpt_dir = args.checkpoint_dir
 
     if 'WORLD_SIZE' in os.environ: args.local_rank = int(os.environ['LOCAL_RANK'])
-    torch.cuda.set_device(args.local_rank)
-    dist.init_process_group(backend='nccl', init_method='env://')
-    device = torch.device(f'cuda:{args.local_rank}')
+    device, ddp_ids = init_distributed(args.local_rank)
     set_seed(args.seed + args.local_rank)
     logger = setup_logger(ckpt_dir, args.local_rank)
     
     writer = None
     if args.local_rank == 0:
-        logger.info(f"Training on {torch.cuda.get_device_name(device)}")
+        logger.info(f"Training on {torch.cuda.get_device_name(device) if device.type == 'cuda' else 'CPU'}")
         start_tensorboard(os.path.join(ckpt_dir, "logs"))
         writer = SummaryWriter(log_dir=os.path.join(ckpt_dir, "logs"))
 
@@ -304,23 +420,25 @@ def main():
     ae_cfg = arch_cfg['ae']
     data_cfg, train_cfg = ae_cfg['data'], ae_cfg['train']
     
-    dataset = TTSDataset(data_cfg['train_metadata'], sample_rate=data_cfg['sample_rate'], segment_size=data_cfg.get('segment_size'))
+    dataset = TTSDataset(data_cfg['train_metadata'], sample_rate=data_cfg['sample_rate'], segment_size=data_cfg.get('segment_size'),
+                         end_crop_prob=0.5 if args.edge_aware else 0.0, drop_list=args.drop_list)
     sampler = DistributedSampler(dataset)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size or train_cfg['batch_size'], sampler=sampler, num_workers=train_cfg['num_workers'], collate_fn=collate_fn, pin_memory=True, persistent_workers=True, prefetch_factor=2)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size or train_cfg['batch_size'], sampler=sampler, num_workers=train_cfg['num_workers'],
+                            collate_fn=collate_fn_edge if args.edge_aware else collate_fn, pin_memory=True, persistent_workers=True, prefetch_factor=2)
+    decoder_cfg = dict(ae_cfg['decoder'])
+    if args.decoder_pad_mode: decoder_cfg['pad_mode'] = args.decoder_pad_mode
     
-    encoder = DDP(LatentEncoder(cfg=ae_cfg['encoder']).to(device), device_ids=[args.local_rank])
+    encoder = DDP(LatentEncoder(cfg=ae_cfg['encoder']).to(device), device_ids=ddp_ids)
     decoder_source = None
     if args.encoder_only:
-        # The decoder is frozen BEFORE (and instead of) DDP wrapping; it has nothing to sync.
-        decoder = LatentDecoder1D(cfg=ae_cfg['decoder']).to(device)
-        decoder.load_state_dict(torch.load(args.decoder, map_location=device)['decoder'])
+        # frozen, so not DDP-wrapped: it has nothing to synchronise
+        decoder = load_frozen_decoder(args.decoder, decoder_cfg, device)
         decoder_source = args.decoder
-        decoder.requires_grad_(False); decoder.eval()
         dec_ref_sd = {k: v.detach().cpu().clone() for k, v in decoder.state_dict().items()}
     else:
-        decoder = DDP(LatentDecoder1D(cfg=ae_cfg['decoder']).to(device), device_ids=[args.local_rank])
-    mpd = DDP(MultiPeriodDiscriminator().to(device), device_ids=[args.local_rank])
-    mrd = DDP(MultiResolutionDiscriminator().to(device), device_ids=[args.local_rank])
+        decoder = DDP(LatentDecoder1D(cfg=decoder_cfg).to(device), device_ids=ddp_ids)
+    mpd = DDP(MultiPeriodDiscriminator().to(device), device_ids=ddp_ids)
+    mrd = DDP(MultiResolutionDiscriminator().to(device), device_ids=ddp_ids)
 
     spec_cfg = ae_cfg['encoder'].get('spec_processor', {})
     mel_transform_input = LinearMelSpectrogram(sample_rate=spec_cfg.get('sample_rate', data_cfg['sample_rate']), n_fft=spec_cfg.get('n_fft', 2048), hop_length=spec_cfg.get('hop_length', 512), win_length=spec_cfg.get('win_length', 2048), n_mels=spec_cfg.get('n_mels', 1253)).to(device)
@@ -330,13 +448,24 @@ def main():
     g_params = list(encoder.parameters()) if args.encoder_only else list(encoder.parameters()) + list(decoder.parameters())
     opt_g = torch.optim.AdamW(g_params, lr=lr, betas=(0.8, 0.99), weight_decay=0.01)
     opt_d = torch.optim.AdamW(list(mpd.parameters()) + list(mrd.parameters()), lr=lr, betas=(0.8, 0.99), weight_decay=0.01)
-    scheduler_g = torch.optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=args.total_steps, eta_min=1e-6)
-    scheduler_d = torch.optim.lr_scheduler.CosineAnnealingLR(opt_d, T_max=args.total_steps, eta_min=1e-6)
+    scheduler_g = make_scheduler(opt_g, args.total_steps)
+    scheduler_d = make_scheduler(opt_d, args.total_steps)
     
     step, epoch = load_checkpoint(args, encoder, decoder, mpd, mrd, opt_g, opt_d, scheduler_g, scheduler_d, logger, device)
     if args.init_encoder and not args.resume:
         load_init_encoder(args.init_encoder, encoder, device)
         if args.local_rank == 0: logger.info(f"Encoder initialised from {args.init_encoder}")
+    if args.continue_cosine:
+        for opt in (opt_g, opt_d):
+            for g in opt.param_groups: g['lr'] = g['initial_lr'] = lr
+        scheduler_g = make_scheduler(opt_g, args.continue_cosine, args.lr_warmup)
+        scheduler_d = make_scheduler(opt_d, args.continue_cosine, args.lr_warmup)
+        if args.local_rank == 0: logger.info(f"New schedule from step {step}: {args.lr_warmup} warm-up steps, cosine over {args.continue_cosine} steps from lr {lr}")
+    terms = ExtraTerms(tail_w=args.tail_consistency, hiband_w=args.hiband_w, floor_w=args.floor_w, floor_db=args.floor_db)
+    if args.tail_consistency > 0:
+        stats = torch.load(args.tail_stats, map_location='cpu')
+        terms.tail_norm = (stats['mean'].view(1, -1, 1).to(device), stats['std'].view(1, -1, 1).to(device))
+    if freeze_bn: freeze_batchnorm(encoder)
     crop_len = int(data_cfg['sample_rate'] * 0.19)
     g_meter, d_meter, mel_meter = AverageMeter(), AverageMeter(), AverageMeter()
     
@@ -345,23 +474,26 @@ def main():
         pbar = tqdm(dataloader, desc=f"Epoch {epoch}", dynamic_ncols=True) if args.local_rank == 0 else dataloader
         for batch in pbar:
             if step >= args.total_steps: break
-            loss_g, loss_d, loss_mel = train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_transforms_loss, opt_g, opt_d, device, crop_len, logger,
-                                                  update_discriminator=(step > args.d_warmup), recon_only=(0 < args.d_warmup and step <= args.d_warmup),
-                                                  recon_full_segment=args.recon_logmel_fullband,
-                                                  fm_composite=args.fm_composite, encoder_only=args.encoder_only)
-            if loss_g is None: break
+            result = train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_transforms_loss, opt_g, opt_d, device, crop_len, logger,
+                                update_discriminator=(step > args.d_warmup), recon_only=(0 < args.d_warmup and step <= args.d_warmup),
+                                recon_full_segment=args.recon_logmel_fullband,
+                                fm_composite=args.fm_composite, encoder_only=args.encoder_only, terms=terms)
+            if result is None: break
+            loss_g, loss_d, loss_mel, extras = result
             scheduler_g.step(); scheduler_d.step()
             
             if args.local_rank == 0:
                 g_meter.update(loss_g); d_meter.update(loss_d); mel_meter.update(loss_mel)
                 if step % 10 == 0:
                     writer.add_scalar("Loss/Generator", loss_g, step); writer.add_scalar("Loss/Discriminator", loss_d, step); writer.add_scalar("Loss/Mel", loss_mel, step); writer.add_scalar("Training/LR", scheduler_g.get_last_lr()[0], step)
+                    for name, value in extras.items(): writer.add_scalar(f"Loss/{name}", value, step)
                 pbar.set_postfix({"Step": step, "G": f"{g_meter.avg:.4f}", "D": f"{d_meter.avg:.4f}", "Mel": f"{mel_meter.avg:.4f}", "LR": f"{scheduler_g.get_last_lr()[0]:.2e}"})
                 if step % train_cfg['save_interval'] == 0:
                     if args.encoder_only:   # the frozen decoder must never move
                         assert all(torch.equal(v.detach().cpu(), dec_ref_sd[k]) for k, v in decoder.state_dict().items()), "frozen decoder changed"
                     save_checkpoint(step, epoch, encoder, decoder, mpd, mrd, opt_g, opt_d, scheduler_g, scheduler_d, logger, ckpt_dir, decoder_source)
                     if args.eval_input: evaluate(encoder, decoder, mel_transform_input, args.eval_input, os.path.join(ckpt_dir, "eval"), step, device, data_cfg['sample_rate'], args.local_rank, keep_decoder_eval=args.encoder_only)
+                    if freeze_bn: freeze_batchnorm(encoder)   # evaluate() puts the encoder back in train mode
             step += 1
         epoch += 1
 
