@@ -271,6 +271,42 @@ SupertonicTTS reports Stage 1 training on four RTX 4090 GPUs [1]. Using the same
 
 ---
 
+## 10. E12b Training Additions
+
+E12b is a full autoencoder (encoder and decoder) continued from the 1.5M-step model. Its decoder uses replicate causal padding, and its latents are a new space: stats files and downstream models built on the 1.5M model do not transfer to it.
+
+### 10.1 Recipe
+
+Initialisation: the 1.5M encoder and the 1.5M decoder after a decoder-only refit. Then 600k steps on the paper losses (λ_recon 45 on full-band log mel over the whole segment, LSGAN λ_adv 1, feature matching λ_fm 0.1 over MPD and MRD together) plus four terms, all flags of `train_autoencoder.py` ([docs/training.md §5](../docs/training.md)):
+
+| Term | What it does | Weight |
+|---|---|---|
+| Edge-aware batches | crops ending at the clip's end, batches aligned to 3072 samples, per-clip loss mask | — |
+| Tail consistency | last compressed latent frame vs. the same clip encoded with two extra silent chunks | 7.5 |
+| High band | log-magnitude STFT L1 above 12 kHz | 2.0 |
+| Silence floor | decoded level on frames whose source is below −60 dBFS | 10 |
+
+AdamW (β 0.8, 0.99, wd 0.01), batch 64 per GPU, 5k-step warm-up to 1.25×10⁻⁵, then cosine to 1×10⁻⁶ at 600k; encoder BatchNorm frozen from 50k.
+
+**Data.** About 4,070 hours in 2.68M files, 2.66M after a noise gate: Hebrew (~1,650 h synthetic speech and ~115 h of recordings), English (~1,050 h), Yiddish (~605 h), German (~257 h), Italian (~128 h), Russian (~98 h), Mandarin (~85 h) and Spanish (~80 h).
+
+### 10.2 Encoding layout
+
+E12b was trained on audio padded to a multiple of 3072 samples (hop 512 × 6), so it is encoded the same way: `6·ceil(L/3072)` latent frames per clip.
+
+### 10.3 Round-trip audit
+
+10 reference clips (LibriTTS, resampled to 44.1 kHz), each codec with its own encoding layout:
+
+| Codec | 228-band log-mel L1 | 12–22 kHz energy vs. source | DNSMOS |
+|-------|------:|------:|------:|
+| E12b | **0.669** | **+0.37 dB** | 3.39 |
+| BlueCodec 1.5M | 1.009 | +19.56 dB | 3.40 |
+
+On 100 held-out English clips not in the training data, E12b scores PESQ-WB 2.35 and STOI 0.883. These are objective measures, not a listening test.
+
+---
+
 ## References
 
 [1] SupertonicTTS (2025). *SupertonicTTS: A Lightweight and Flexible Text-to-Speech System with Latent Diffusion.* arXiv:2503.23108.
