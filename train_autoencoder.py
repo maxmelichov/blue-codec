@@ -283,7 +283,6 @@ def main():
     # --- Paper losses (defaults reproduce the 1.5M-step recipe) ---
     parser.add_argument('--recon_logmel_fullband', action='store_true', help='Reconstruction on LOG mel up to sr/2 over the whole segment')
     parser.add_argument('--fm_composite', action='store_true', help='Feature matching averaged over MPD+MRD layers together (paper Eq. 6)')
-    parser.add_argument('--lambda_recon', type=float, default=45.0)
     args = parser.parse_args()
     if args.encoder_only and not args.decoder:
         raise SystemExit("--encoder_only needs --decoder (supertonic3 or a checkpoint path)")
@@ -333,8 +332,6 @@ def main():
     spec_cfg = ae_cfg['encoder'].get('spec_processor', {})
     mel_transform_input = LinearMelSpectrogram(sample_rate=spec_cfg.get('sample_rate', data_cfg['sample_rate']), n_fft=spec_cfg.get('n_fft', 2048), hop_length=spec_cfg.get('hop_length', 512), win_length=spec_cfg.get('win_length', 2048), n_mels=spec_cfg.get('n_mels', 1253)).to(device)
     mel_transforms_loss = get_mel_transforms(data_cfg, device, logmel_fullband=args.recon_logmel_fullband)
-    if args.local_rank == 0:
-        logger.info(f"[loss] lambda_recon={args.lambda_recon} logmel_fullband={args.recon_logmel_fullband} fm_composite={args.fm_composite} d_warmup={args.d_warmup}")
     
     lr = args.lr if args.lr else float(train_cfg['lr'])
     g_params = list(encoder.parameters()) if args.encoder_only else list(encoder.parameters()) + list(decoder.parameters())
@@ -357,7 +354,7 @@ def main():
             if step >= args.total_steps: break
             loss_g, loss_d, loss_mel = train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_transforms_loss, opt_g, opt_d, device, crop_len, logger,
                                                   update_discriminator=(step > args.d_warmup), recon_only=(0 < args.d_warmup and step <= args.d_warmup),
-                                                  lambda_recon=args.lambda_recon, recon_full_segment=args.recon_logmel_fullband,
+                                                  recon_full_segment=args.recon_logmel_fullband,
                                                   fm_composite=args.fm_composite, encoder_only=args.encoder_only)
             if loss_g is None: break
             scheduler_g.step(); scheduler_d.step()
