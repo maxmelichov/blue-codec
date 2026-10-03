@@ -7,9 +7,9 @@ from .modules import CausalConv1d, CausalConvNeXtBlock
 
 
 class CausalInputProjection(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, pad_mode="zeros"):
+    def __init__(self, in_channels, out_channels, kernel_size):
         super().__init__()
-        self.net = CausalConv1d(in_channels, out_channels, kernel_size=kernel_size, pad_mode=pad_mode)
+        self.net = CausalConv1d(in_channels, out_channels, kernel_size=kernel_size)
 
     def forward(self, x):
         return self.net(x)
@@ -25,11 +25,11 @@ class FinalBatchNorm1d(nn.Module):
 
 
 class VocoderHead(nn.Module):
-    def __init__(self, dim=512, hdim=2048, out_dim=512, kernel_size=3, pad_mode="zeros"):
+    def __init__(self, dim=512, hdim=2048, out_dim=512, kernel_size=3):
         super().__init__()
         # Match the AE decoder head config:
         # layer1 causal conv -> PReLU -> layer2 1x1 conv -> transpose -> reshape.
-        self.layer1 = CausalInputProjection(dim, hdim, kernel_size=kernel_size, pad_mode=pad_mode)
+        self.layer1 = CausalInputProjection(dim, hdim, kernel_size=kernel_size)
         self.act = nn.PReLU()
         self.layer2 = nn.Conv1d(hdim, out_dim, kernel_size=1, bias=False)
 
@@ -69,8 +69,6 @@ class LatentDecoder1D(nn.Module):
         intermediate_dim = cfg['intermediate_dim']
         kernel_size = cfg['ksz']
         dilations = cfg['dilation_lst']
-        # "zeros" = the published 1.5M-step decoder; "replicate" = the official vocoder
-        pad_mode = cfg.get('pad_mode', 'zeros')
 
         self.input_channels = in_channels
         self.chunk_compress_factor = int(cfg.get('chunk_compress_factor', 1))
@@ -83,15 +81,14 @@ class LatentDecoder1D(nn.Module):
         self.register_buffer('latent_mean', torch.zeros(1, in_channels, 1), persistent=False)
         self.register_buffer('latent_std', torch.ones(1, in_channels, 1), persistent=False)
 
-        self.embed = CausalInputProjection(in_channels, dim, kernel_size=kernel_size, pad_mode=pad_mode)
+        self.embed = CausalInputProjection(in_channels, dim, kernel_size=kernel_size)
 
         self.convnext = nn.ModuleList([
             CausalConvNeXtBlock(
                 dim=dim, 
                 intermediate_dim=intermediate_dim, 
                 kernel_size=kernel_size, 
-                dilation=d,
-                pad_mode=pad_mode,
+                dilation=d
             )
             for d in dilations
         ])
@@ -110,7 +107,6 @@ class LatentDecoder1D(nn.Module):
             hdim=head_cfg['hdim'],
             out_dim=head_cfg['odim'],
             kernel_size=int(head_cfg.get('ksz', 3)),
-            pad_mode=pad_mode,
         )
 
     def _prepare_latents(self, x):
@@ -185,55 +181,3 @@ class LatentDecoder1D(nn.Module):
         x = self.final_norm(x)
         waveform = self.head(x)
         return waveform
-
-
-# --- Official vocoder as a LatentDecoder1D ----------------------------------------------------
-# OpenRAIL-M weights (see README, "References and acknowledgements"), never bundled: `onnx/vocoder.onnx`
-# is downloaded at load time and mapped 1:1 onto this decoder. Needs `pip install onnx` (imported lazily).
-SUPERTONIC3_REPO = "Supertone/supertonic-3"
-SUPERTONIC3_REVISION = "3cadd1ee6394adea1bd021217a0e650ede09a323"   # vocoder.onnx md5 68e5b768810cb3c2cf7a27f3ce2494e3
-SUPERTONIC3_DECODER_CFG = {
-    "idim": 24, "hdim": 512, "intermediate_dim": 2048, "ksz": 7,
-    "dilation_lst": [1, 2, 4, 1, 2, 4, 1, 1, 1, 1],
-    "head": {"idim": 512, "hdim": 2048, "odim": 512, "ksz": 3},
-    "chunk_compress_factor": 1, "normalizer_scale": 1.0, "pad_mode": "replicate",
-}
-_SUPERTONIC3_ALIAS = {"onnx::Conv_1441": "embed.net.weight", "onnx::Conv_1442": "embed.net.bias",
-                      "onnx::PRelu_1506": "head.act.weight"}
-
-
-def supertonic3_decoder_state(reference_sd, onnx_path=None):
-    """Map the official vocoder.onnx onto a LatentDecoder1D state dict.
-
-    Returns (state_dict, latent_mean, latent_std, normalizer_scale); the last three are the
-    graph's own input normalisation for [B, 144, T] latents and are not used by this decoder,
-    which takes raw [B, 24, T] latents.
-    """
-    try:
-        import onnx
-        from onnx import numpy_helper
-    except ImportError as e:
-        raise ImportError("Loading the official vocoder reads its ONNX file: pip install onnx") from e
-    if onnx_path is None:
-        from huggingface_hub import hf_hub_download
-        onnx_path = hf_hub_download(SUPERTONIC3_REPO, "onnx/vocoder.onnx", revision=SUPERTONIC3_REVISION)
-    off = {t.name: torch.from_numpy(numpy_helper.to_array(t).copy()) for t in onnx.load(onnx_path).graph.initializer}
-    sd = {}
-    for k, v in off.items():
-        n = k[len("tts.ae.decoder."):] if k.startswith("tts.ae.decoder.") else _SUPERTONIC3_ALIAS.get(k)
-        if n is not None:
-            sd[n] = v.reshape(reference_sd[n].shape)
-    sd["final_norm.norm.num_batches_tracked"] = reference_sd["final_norm.norm.num_batches_tracked"]
-    if set(sd) != set(reference_sd):
-        raise RuntimeError(f"Official vocoder mapping mismatch: {sorted(set(sd) ^ set(reference_sd))}")
-    return sd, off["tts.ae.latent_mean"], off["tts.ae.latent_std"], float(off["tts.ttl.normalizer.scale"])
-
-
-def load_supertonic3_decoder(device="cpu", freeze=True, onnx_path=None):
-    """LatentDecoder1D holding the official vocoder (frozen, eval, raw [B, 24, T] input)."""
-    dec = LatentDecoder1D(cfg=dict(SUPERTONIC3_DECODER_CFG))
-    dec.load_state_dict(supertonic3_decoder_state(dec.state_dict(), onnx_path)[0], strict=True)
-    dec.to(device).eval()
-    if freeze:
-        dec.requires_grad_(False)
-    return dec

@@ -6,7 +6,7 @@
 
 ## 1. Overview
 
-BlueCodec is a neural speech autoencoder designed to serve as the acoustic backbone of a latent-diffusion-based TTS system. Following the general design principle of SupertonicTTS [1], training is divided into three stages: (1) a speech autoencoder that compresses audio into a compact continuous latent space and reconstructs it, (2) a text-to-latent diffusion module, and (3) a duration predictor. This document covers Stage 1 in full. Section 10 (Sept 2026) adds an encoder trained against a frozen pretrained vocoder.
+BlueCodec is a neural speech autoencoder designed to serve as the acoustic backbone of a latent-diffusion-based TTS system. Following the general design principle of SupertonicTTS [1], training is divided into three stages: (1) a speech autoencoder that compresses audio into a compact continuous latent space and reconstructs it, (2) a text-to-latent diffusion module, and (3) a duration predictor. This document covers Stage 1 in full.
 
 The autoencoder is trained within a Generative Adversarial Network (GAN) framework, combining reconstruction, adversarial, and feature matching objectives. The resulting model functions as a neural vocoder with a low-dimensional latent bottleneck, operating at 44.1 kHz with a 24-dimensional latent space at approximately 86 Hz.
 
@@ -268,44 +268,6 @@ Many open speech autoencoders are implicitly biased toward English phonetics bec
 Achieving real-time 44.1 kHz streaming synthesis is often associated with large compute clusters. BlueCodec shows that strong neural audio compression can be trained on consumer hardware. Efficient ConvNeXt blocks (depthwise-separable convolutions instead of heavy recurrence), a compact 24-channel latent bottleneck, and the sub-pixel expansion head keep the autoencoder footprint modest (on the order of ~51M parameters for encoder + decoder) while targeting full-band reconstruction.
 
 SupertonicTTS reports Stage 1 training on four RTX 4090 GPUs [1]. Using the same iteration budget and batch size on **two RTX 3090** GPUs with PyTorch DDP, this build completed in roughly **four weeks** — a practical datapoint that architectural efficiency and a well-matched training recipe matter as much as raw accelerator count for this class of model.
-
----
-
-## 10. Encoder Trained Against a Frozen Pretrained Vocoder (Sept 2026)
-
-### 10.1 Idea
-
-A publicly released pretrained TTS model ships its vocoder as `onnx/vocoder.onnx` under OpenRAIL-M (source and license in the README's *References and acknowledgements*); we call it the official vocoder. Its decoder has exactly our `LatentDecoder1D` layout, so its 103 ONNX initializers map 1:1 onto our 101 decoder tensors. The one difference is padding: every Pad node in the graph is `mode='edge'`, so the port uses replicate causal padding (`pad_mode="replicate"`). The port matches onnxruntime to a max abs difference of 7.2e-6.
-
-We keep that decoder **frozen** and train **only our encoder** through it, so the encoder learns to emit the official latent space. The weights are not redistributed; `bluecodec/autoencoder/latent_decoder.py` downloads them at load time (pinned revision `3cadd1ee`).
-
-### 10.2 Recipe
-
-| Parameter | Value |
-|-----------|-------|
-| Encoder init | 1.5M-step encoder (identical to the one in `model.safetensors`) |
-| Decoder | official vocoder, frozen (`requires_grad=False`, `eval()`), asserted unchanged at every save |
-| Trained | encoder + MPD + MRD |
-| Stage 1 (0 → 290k) | AdamW (β₁=0.8, β₂=0.99, wd=0.01), 8.5×10⁻⁵ cosine; 2× RTX 5090, 64 segments × 61,740 samples per GPU; λ_recon=45 on full-band log mel over the whole segment, λ_adv=1, λ_fm=0.1 (MPD+MRD composite, paper Eq. 6); first 10k steps reconstruction-only |
-| Stage 2 (290k → 350k) | 2×10⁻⁵ with a 1k-step warm-up and cosine decay, trained with edge-aware batches and a tail-consistency term so the encoder's last frames match the rest of the clip |
-| Released | step 350k, `encoder_supertonic3_decoder_edge_fixed/encoder.safetensors` |
-
-Command line and flag reference: [docs/training.md §4](../docs/training.md).
-
-### 10.3 Round-trip audit
-
-Round trip on 10 reference clips (LibriTTS recordings at 24 kHz resampled to 44.1 kHz, so the source's 12–22 kHz band is nearly empty and a positive delta there is energy the decoder adds), plain `encode()`:
-
-| Codec | front-end L1 | front-end L1 >8k | mel228 L1 | 12–22 kHz vs source | DNSMOS |
-|-------|------:|------:|------:|------:|------:|
-| BlueCodec 1.5M (`model.safetensors`) | 0.4426 | 0.3757 | 1.0094 | +19.56 dB | 3.40 |
-| **Official-vocoder encoder** + official vocoder | **0.3388** | **0.2234** | **0.8839** | **+7.10 dB** | **3.44** |
-
-*front-end L1* is the L1 of `log(clamp(F, 1e-5))` where `F` is the encoder front end (1025 log-linear + 228 log-mel channels); *>8k* is the same over channels `[int(1253·8000/22050):]`. *mel228 L1* is the plain L1 between 228-band log mels. The 12–22 kHz column is the reconstruction's mean STFT power in 12–22.05 kHz minus the source's; DNSMOS is the overall MOS of the reconstruction resampled to 16 kHz. This is a 10-clip round-trip audit, not a listening test.
-
-### 10.4 Downstream caveat
-
-This encoder moves the latent space: any stats file, text-to-latent or duration checkpoint and exported voice built on the 1.5M encoder is invalid with it.
 
 ---
 
