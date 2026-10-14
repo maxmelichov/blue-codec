@@ -52,7 +52,8 @@ class BlueCodec(nn.Module):
         if model is None:
             codec = cls()
             sd = load_file(_weights_path(repo_id, filename or "model.safetensors"), device=device)
-            codec.load_state_dict(sd, strict=False)
+            codec.encoder.load_state_dict({k[8:]: v for k, v in sd.items() if k.startswith("encoder.")}, strict=True)
+            codec.decoder.load_state_dict({k[8:]: v for k, v in sd.items() if k.startswith("decoder.")}, strict=True)
         elif model == "e12b":
             codec = cls(decoder_cfg=dict(E12B_DECODER_CFG), chunk=E12B_CHUNK)
             filename = filename or E12B_FILE
