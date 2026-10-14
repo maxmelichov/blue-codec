@@ -62,6 +62,7 @@ class LatentDecoder1D(nn.Module):
                 "head": {"idim": 512, "hdim": 2048, "odim": 512, "ksz": 3},
                 "chunk_compress_factor": 1,
                 "normalizer_scale": 1.0,
+                "pad_mode": "zeros",
             }
 
         in_channels = cfg['idim']
