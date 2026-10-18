@@ -101,7 +101,7 @@ def get_mel_transforms(data_cfg, device, logmel_fullband=False):
     if logmel_fullband:
         return [LogMelFullBand(data_cfg['sample_rate'], n_fft, hop, win, n_mels).to(device)
                 for (n_fft, hop, win, n_mels) in mel_configs]
-    return [MelSpectrogramNoLog(data_cfg['sample_rate'], n_fft, hop, win, n_mels).to(device)
+    return [MelSpectrogramNoLog(data_cfg['sample_rate'], n_fft=n_fft, win_length=win, hop_length=hop, n_mels=n_mels).to(device)
             for (n_fft, hop, win, n_mels) in mel_configs]
 
 def chunk_ceil(n): return (n + CHUNK - 1) // CHUNK * CHUNK
