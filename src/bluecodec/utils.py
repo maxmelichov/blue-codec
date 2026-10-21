@@ -7,13 +7,14 @@ def compress_latents(z: torch.Tensor, factor: int = 6) -> torch.Tensor:
     """
     Compress latent sequence by grouping 'factor' frames.
     Input: [B, C, T]
-    Output: [B, C * factor, T // factor]
+    Output: [B, C * factor, ceil(T / factor)]
     """
     B, C, T = z.shape
     # Pad if necessary
     if T % factor != 0:
         pad = factor - (T % factor)
-        z = torch.nn.functional.pad(z, (0, pad))
+        # Repeat the last frame: a zero frame is a latent the decoder never saw in training.
+        z = torch.cat([z, z[:, :, -1:].expand(-1, -1, pad)], dim=2)
         T = T + pad
         
     z = z.view(B, C, T // factor, factor)
