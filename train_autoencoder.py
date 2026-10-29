@@ -106,7 +106,9 @@ def get_mel_transforms(data_cfg, device, recon="linmel_12k"):
     if recon == "logmel_fullband":
         return [LogMelFullBand(sr, n_fft, hop, win, n_mels).to(device) for (n_fft, hop, win, n_mels) in mel_configs]
     f_max = {"linmel_12k": 12000, "linmel_fullband": sr // 2}[recon]
-    return [MelSpectrogramNoLog(sr, n_fft, hop, win, n_mels, f_max=f_max).to(device)
+    # keywords: MelSpectrogramNoLog takes (sample_rate, n_fft, win_length, hop_length); passed positionally, window and
+    # hop were swapped (window 256 / hop 1024 at n_fft 1024), so every resolution ran with the wrong window and hop
+    return [MelSpectrogramNoLog(sr, n_fft=n_fft, win_length=win, hop_length=hop, n_mels=n_mels, f_max=f_max).to(device)
             for (n_fft, hop, win, n_mels) in mel_configs]
 
 def chunk_ceil(n): return (n + CHUNK - 1) // CHUNK * CHUNK
