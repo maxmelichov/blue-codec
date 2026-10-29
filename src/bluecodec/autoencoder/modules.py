@@ -20,15 +20,21 @@ class ConvNeXtBlock(nn.Module):
     """
     1D ConvNeXt Block with Dilation support.
     """
-    def __init__(self, dim=512, intermediate_dim=2048, kernel_size=7, dilation=1, layer_scale_init_value=1e-6):
+    def __init__(self, dim=512, intermediate_dim=2048, kernel_size=7, dilation=1, layer_scale_init_value=1e-6,
+                 pad_mode="zeros"):
         super().__init__()
         
         padding = (kernel_size - 1) * dilation // 2
+        # pad_mode "replicate" pads in forward() (edge padding, like every Pad node of the official graphs),
+        # so the state_dict keys are the same in both modes. "zeros" = the published encoder.
+        if pad_mode not in ("zeros", "replicate"):
+            raise ValueError(f"pad_mode must be 'zeros' or 'replicate', got {pad_mode!r}")
+        self._edge_pad = padding if pad_mode == "replicate" else 0
         
         self.dwconv = nn.Conv1d(
             dim, dim, 
             kernel_size=kernel_size, 
-            padding=padding, 
+            padding=0 if self._edge_pad else padding, 
             dilation=dilation, 
             groups=dim
         )
@@ -41,6 +47,8 @@ class ConvNeXtBlock(nn.Module):
         
     def forward(self, x):
         residual = x
+        if self._edge_pad:
+            x = torch.nn.functional.pad(x, (self._edge_pad, self._edge_pad), mode="replicate")
         x = self.dwconv(x)
         x = self.norm(x)
         x = self.pwconv1(x)

@@ -24,8 +24,12 @@ class LatentEncoder(nn.Module):
         intermediate_dim = cfg['intermediate_dim']
         dilations = cfg['dilation_lst']
 
+        # "replicate": edge padding at the clip ends instead of zeros, so the first/last frames do not
+        # see an artificial silence. "zeros" (default) = the published encoder.
+        pad_mode = cfg.get('pad_mode', 'zeros')
+        self._edge_pad = kernel_size // 2 if pad_mode == "replicate" else 0
         self.stem = nn.Sequential(
-            nn.Conv1d(in_channels, dim, kernel_size=kernel_size, padding=kernel_size//2),
+            nn.Conv1d(in_channels, dim, kernel_size=kernel_size, padding=0 if self._edge_pad else kernel_size//2),
             nn.BatchNorm1d(dim),
         )
 
@@ -34,7 +38,8 @@ class LatentEncoder(nn.Module):
                 dim=dim, 
                 intermediate_dim=intermediate_dim, 
                 kernel_size=kernel_size, 
-                dilation=d
+                dilation=d,
+                pad_mode=pad_mode,
             )
             for d in dilations
         ])
@@ -43,6 +48,8 @@ class LatentEncoder(nn.Module):
         self.norm = LayerNorm1d(out_channels)
 
     def forward(self, x):
+        if self._edge_pad:
+            x = nn.functional.pad(x, (self._edge_pad, self._edge_pad), mode="replicate")
         x = self.stem(x)
         for block in self.blocks:
             x = block(x)
