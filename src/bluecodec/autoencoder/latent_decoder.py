@@ -217,7 +217,8 @@ def supertonic3_decoder_state(onnx_path=None):
     if onnx_path is None:
         from huggingface_hub import hf_hub_download
         onnx_path = hf_hub_download(SUPERTONIC3_REPO, "onnx/vocoder.onnx", revision=SUPERTONIC3_REVISION)
-    reference_sd = LatentDecoder1D(cfg=SUPERTONIC3_DECODER_CFG).state_dict()
+    with torch.random.fork_rng(devices=[]):   # only the shapes are needed; leave the caller's RNG stream alone
+        reference_sd = LatentDecoder1D(cfg=SUPERTONIC3_DECODER_CFG).state_dict()
     off = {t.name: torch.from_numpy(numpy_helper.to_array(t).copy()) for t in onnx.load(onnx_path).graph.initializer}
     sd = {}
     for k, v in off.items():
