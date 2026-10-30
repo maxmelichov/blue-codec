@@ -24,8 +24,6 @@ class LatentEncoder(nn.Module):
         intermediate_dim = cfg['intermediate_dim']
         dilations = cfg['dilation_lst']
 
-        # "replicate": edge padding at the clip ends instead of zeros, so the first/last frames do not
-        # see an artificial silence. "zeros" (default) = the published encoder.
         pad_mode = cfg.get('pad_mode', 'zeros')
         self.stem = nn.Sequential(
             SameConv1d(in_channels, dim, kernel_size=kernel_size, pad_mode=pad_mode),
