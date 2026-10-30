@@ -99,15 +99,13 @@ class LogMelFullBand(nn.Module):
     def forward(self, x): return torch.log(self.mel(x).clamp_min(self.eps))
 
 def get_mel_transforms(data_cfg, device, recon="linmel_12k"):
-    # linmel_12k (default): linear mels capped at 12 kHz. linmel_fullband: linear mels up to sr/2, the paper's
-    # "L1 over multi-resolution mel spectrograms" (no log, no cap). logmel_fullband: log mels up to sr/2.
+    # linmel_12k: linear mels up to 12 kHz (default); linmel_fullband: up to sr/2 (paper); logmel_fullband: log mels up to sr/2
     sr = data_cfg['sample_rate']
     mel_configs = [(1024, 256, 1024, 64), (2048, 512, 2048, 128), (4096, 1024, 4096, 128)]
     if recon == "logmel_fullband":
         return [LogMelFullBand(sr, n_fft, hop, win, n_mels).to(device) for (n_fft, hop, win, n_mels) in mel_configs]
     f_max = {"linmel_12k": 12000, "linmel_fullband": sr // 2}[recon]
-    # keywords: MelSpectrogramNoLog takes (sample_rate, n_fft, win_length, hop_length); passed positionally, window and
-    # hop were swapped (window 256 / hop 1024 at n_fft 1024), so every resolution ran with the wrong window and hop
+    # by keyword: the signature is (sample_rate, n_fft, win_length, hop_length), positionally window and hop were swapped
     return [MelSpectrogramNoLog(sr, n_fft=n_fft, win_length=win, hop_length=hop, n_mels=n_mels, f_max=f_max).to(device)
             for (n_fft, hop, win, n_mels) in mel_configs]
 
@@ -166,8 +164,7 @@ def random_crop(audio, y_hat, crop_len, limit):
     return audio[..., start : start + crop_len], y_hat[..., start : start + crop_len]
 
 def recon_l1(real, fake, mel_transforms):
-    """The reconstruction term: mel L1 averaged over the resolutions. real/fake: [B, 1, T] or [B, T]."""
-    # squeeze per transform, as before: one shared view would change the order in which gradients accumulate
+    # squeeze per transform: one shared view changes the order in which gradients accumulate
     loss = sum(F.l1_loss(tf(real.squeeze(1)), tf(fake.squeeze(1))) for tf in mel_transforms)
     return loss / len(mel_transforms) if mel_transforms else loss
 
@@ -176,7 +173,6 @@ def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_trans
                terms=None, clip_generator=True):
     # recon_only: no adversarial or feature-matching terms for the generator.
     # encoder_only: the frozen decoder stays in the graph, so gradients reach the encoder through it.
-    # clip_generator=False: only the discriminators are clipped (at 1); encoder/decoder gradients are not rescaled.
     lambda_adv, lambda_fm = 1.0, 0.1
     batch, lengths = batch if isinstance(batch, (tuple, list)) else (batch, None)   # lengths: edge-aware batches
     audio = batch.to(device)
@@ -245,7 +241,7 @@ def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_trans
     return loss_g_total.item(), loss_d_total, L_recon.item(), {k: loss.item() for k, (_, loss) in extras.items()}
 
 def freeze_batchnorm(model):
-    """BatchNorm layers in eval mode (running statistics used and not updated); _BatchNorm also covers SyncBatchNorm."""
+    """BatchNorm layers in eval mode (running statistics used and not updated)."""
     for m in _mod(model).modules():
         if isinstance(m, nn.modules.batchnorm._BatchNorm): m.eval()
 
@@ -257,7 +253,6 @@ def make_scheduler(opt, t_max, warmup=0):
     return torch.optim.lr_scheduler.SequentialLR(opt, [linear, cosine], milestones=[warmup])
 
 def cosine_schedulers(opt_g, opt_d, t_max, warmup=0):
-    """make_scheduler for G and D: (the checkpointed schedulers, the G one that reports the lr)."""
     schedulers = {'scheduler_g': make_scheduler(opt_g, t_max, warmup), 'scheduler_d': make_scheduler(opt_d, t_max, warmup)}
     return schedulers, schedulers['scheduler_g']
 
@@ -293,11 +288,10 @@ def evaluate(encoder, decoder, mel_transform, input_wav_path, output_dir, step, 
 
 @torch.no_grad()
 def heldout_recon(encoder, decoder, mel_transform, mel_transforms_loss, clips, device):
-    """Mean reconstruction L1 (the training recon term) over fixed held-out clips, one clip at a time (no padding)."""
     encoder.eval(); decoder.eval()
     total = 0.0
     for wav in clips:
-        wav = wav.to(device).unsqueeze(0)                       # [1, T]
+        wav = wav.to(device).unsqueeze(0)
         y_hat = decoder(encoder(mel_transform(wav))).reshape(1, -1)
         n = min(y_hat.shape[-1], wav.shape[-1])
         total += recon_l1(wav[..., :n], y_hat[..., :n], mel_transforms_loss).item()
@@ -309,8 +303,7 @@ def ema_update(ema, model, decay):
     for be, bm in zip(ema.buffers(), model.buffers()): be.copy_(bm)   # BatchNorm running stats follow the raw model
 
 def param_groups(named, lr, no_decay_norms):
-    """AdamW groups. no_decay_norms: no weight decay on norms, biases, PReLU slopes and layer-scale gammas
-    (decay on a scale pulls it toward 0, which is not a regulariser for these)."""
+    # no_decay_norms: no weight decay on norms, biases, PReLU slopes and layer-scale gammas
     named = list(named)
     if not no_decay_norms: return [{'params': [p for _, p in named], 'lr': lr}]
     nd = lambda n, p: p.ndim <= 1 or n.endswith('gamma')
@@ -318,10 +311,8 @@ def param_groups(named, lr, no_decay_norms):
             {'params': [p for n, p in named if nd(n, p)], 'lr': lr, 'weight_decay': 0.0}]
 
 class PlateauLR:
-    """Linear warm-up, then a flat lr (the paper gives a flat 2e-4) that is halved, for G and D together, when the
-    held-out reconstruction has not improved by `threshold` (relative) for `patience` checks; never below `min_lr`.
-    A group with g['ramp_from'] set ramps linearly from 0 over `ramp` steps from that step: stage 2 starts a
-    pretrained decoder with fresh Adam moments, whose first full-size steps would otherwise jolt it."""
+    """Warm-up, then a flat lr halved (G and D together) when the held-out recon stops improving, never below min_lr.
+    Groups with g['ramp_from'] ramp from 0 over `ramp` steps: the stage-2 decoder starts with fresh Adam moments."""
     def __init__(self, opts, lr, warmup, min_lr, patience, threshold, ramp=0):
         self.opts, self.lr, self.warmup, self.min_lr = opts, lr, warmup, min_lr
         self.patience, self.threshold, self.ramp = patience, threshold, ramp
@@ -337,16 +328,9 @@ class PlateauLR:
                 g['lr'] = g['base_lr'] * f
 
     def report(self, val):
-        """Returns True when this check halved the lr."""
-        if val < self.best * (1.0 - self.threshold):
-            self.best, self.bad = val, 0
-            return False
-        self.bad += 1
-        if self.bad < self.patience: return False
-        self.bad = 0
-        new = max(self.scale * 0.5, self.min_lr / self.lr)
-        halved, self.scale = new < self.scale, new
-        return halved
+        if val < self.best * (1.0 - self.threshold): self.best, self.bad = val, 0
+        else: self.bad += 1
+        if self.bad >= self.patience: self.bad, self.scale = 0, max(self.scale * 0.5, self.min_lr / self.lr)
 
     def get_last_lr(self): return [g['lr'] for g in self.opts[0].param_groups]
     def state_dict(self): return {'scale': self.scale, 'best': self.best, 'bad': self.bad}
@@ -358,8 +342,7 @@ class AverageMeter:
     def update(self, val, n=1): self.val = val; self.sum += val * n; self.count += n; self.avg = self.sum / self.count
 
 def load_checkpoint(args, ckpt, encoder, decoder, mpd, mrd, opt_g, opt_d, schedulers, dec_groups, logger):
-    """Loads weights, optimizer and scheduler state; returns (step, epoch), (0, 0) for a fresh optimizer and schedule.
-    dec_groups (stage 2) are added to opt_g here: a stage-2 checkpoint saved them, a stage-1 one did not."""
+    # dec_groups (stage 2) are appended to opt_g here: a stage-2 checkpoint saved them, a stage-1 one did not
     def load_sd(model, sd):
         if any(k.startswith('module.') for k in sd.keys()): sd = {k.replace('module.', ''): v for k, v in sd.items()}
         md = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
@@ -382,8 +365,7 @@ def load_checkpoint(args, ckpt, encoder, decoder, mpd, mrd, opt_g, opt_d, schedu
         load_sd(encoder, ckpt['encoder'])
         if not args.encoder_only and 'decoder' in ckpt: load_sd(decoder, ckpt['decoder'])   # encoder_only: decoder comes from --decoder
         load_sd(mpd, ckpt['mpd']); load_sd(mrd, ckpt['mrd'])
-        # Stage 1 -> 2: the encoder keeps its Adam moments (same tensors, same groups, saved first), loaded
-        # before the decoder groups are appended with fresh moments.
+        # stage 1 -> 2: the encoder keeps its Adam moments; the decoder groups are appended after with fresh ones
         if args.stage2 and ckpt.get('stage') != 2: resumed = load_state()
     for g in dec_groups: opt_g.add_param_group(g)
     if ckpt is None or resumed: return resumed or (0, 0)
@@ -408,12 +390,6 @@ def save_checkpoint(step, epoch, encoder, decoder, mpd, mrd, opt_g, opt_d, sched
     torch.save(state, os.path.join(ckpt_dir, f"ae_{step}.pt"))
     torch.save(state, os.path.join(ckpt_dir, "ae_latest.pt"))
     cleanup_checkpoints(logger, ckpt_dir)
-
-@torch.no_grad()
-def init_encoder_ln(encoder, mean, std):
-    """The encoder's final LayerNorm affine starts at the official per-channel latent std / mean, so a fresh
-    encoder emits latents in the range the official decoder expects instead of ~unit scale."""
-    encoder.norm.norm.weight.copy_(std.reshape(-1)); encoder.norm.norm.bias.copy_(mean.reshape(-1))
 
 def load_init_encoder(path, encoder, device):
     # .pt checkpoint ({'encoder': ...}) or a BlueCodec .safetensors ('encoder.*' keys, e.g. HF model.safetensors)
@@ -456,17 +432,15 @@ def main():
     parser.add_argument('--finetune', action='store_true', help='With --resume: load the weights only (fresh optimizer and schedule, step 0)')
     parser.add_argument('--lr', type=float, default=None, help='Peak learning rate (overrides ae.train.lr)')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints/ae', help='Checkpoints, logs and eval audio')
-    parser.add_argument('--total_steps', type=int, default=1500000, help='Training stops here (and cosine T_max)')
+    parser.add_argument('--total_steps', type=int, default=1500000, help='Loop length and cosine T_max')
     parser.add_argument('--batch_size', type=int, default=None, help='Per-process batch size (overrides ae.train.batch_size)')
-    # --- Encoder-only training against a frozen decoder (stage 1 of the two-stage recipe) ---
+    # --- Encoder-only training against a frozen decoder ---
     parser.add_argument('--encoder_only', action='store_true', help='Freeze the decoder (from --decoder) and train the encoder + discriminators')
     parser.add_argument('--decoder', type=str, default=None, help='Frozen decoder for --encoder_only: an AE .pt checkpoint, or "official" (Supertonic-3 vocoder)')
     parser.add_argument('--official_onnx', type=str, default=None, help='Local official vocoder.onnx (default: downloaded at a pinned revision)')
     parser.add_argument('--init_encoder', type=str, default=None, help='Encoder init: AE .pt checkpoint or BlueCodec .safetensors (fresh optimizer, step 0)')
     parser.add_argument('--d_warmup', type=int, default=0, help='Discriminators frozen, reconstruction-only loss for the first N steps')
-    # --- Stage 2: the decoder becomes trainable ---
     parser.add_argument('--stage2', action='store_true', help='Resume an --encoder_only checkpoint (--resume) with the decoder trainable')
-    parser.add_argument('--val_data', type=str, default=None, help='Held-out audio for lr_schedule "plateau" (default ae.data.val_metadata)')
     # --- Paper losses (defaults reproduce the 1.5M-step recipe) ---
     parser.add_argument('--recon_logmel_fullband', action='store_true', help='Reconstruction on LOG mel up to sr/2 over the whole segment')
     parser.add_argument('--fm_composite', action='store_true', help='Feature matching averaged over MPD+MRD layers together (paper Eq. 6)')
@@ -490,8 +464,6 @@ def main():
     args = parser.parse_args()
     if args.encoder_only and not args.decoder:
         raise SystemExit("--encoder_only needs --decoder (an AE .pt checkpoint or 'official')")
-    if args.stage2 and (args.encoder_only or not args.resume):
-        raise SystemExit("--stage2 continues a checkpoint: it needs --resume and excludes --encoder_only")
     if args.tail_consistency > 0 and not (args.edge_aware and args.tail_stats):
         raise SystemExit("--tail_consistency needs --edge_aware and --tail_stats")
     if args.continue_cosine and not args.resume:
@@ -515,7 +487,7 @@ def main():
     with open(args.arch_config, "r") as f: arch_cfg = json.load(f)
     ae_cfg = arch_cfg['ae']
     data_cfg, train_cfg = ae_cfg['data'], ae_cfg['train']
-    # Recipe switches live in ae.train (config/tts_st3.json); every missing key keeps the default recipe.
+    # two-stage recipe switches (config/tts_st3.json); a missing key keeps the default recipe
     recon = "logmel_fullband" if args.recon_logmel_fullband else train_cfg.get('recon', 'linmel_12k')
     fm_composite = args.fm_composite or train_cfg.get('fm_composite', False)
     ema_decay = float(train_cfg.get('ema', 0.0))
@@ -523,12 +495,7 @@ def main():
     clip_generator = train_cfg.get('clip_generator', True)
     lr_schedule = train_cfg.get('lr_schedule', 'cosine')
     dec_lr_scale = float(train_cfg.get('dec_lr_scale', 1.0))
-    if args.stage2 and lr_schedule != 'plateau':
-        raise SystemExit("--stage2 needs ae.train.lr_schedule 'plateau' (it ramps the decoder's lr from the switch step)")
-    if args.continue_cosine and lr_schedule != 'cosine':
-        raise SystemExit("--continue_cosine needs ae.train.lr_schedule 'cosine'")
-    if not train_cfg.get('tf32', True):
-        # Strict fp32: cuDNN convolutions run in TF32 (~10 mantissa bits) by default on Ampere and newer GPUs.
+    if not train_cfg.get('tf32', True):   # strict fp32 (cuDNN defaults to TF32 on Ampere+)
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
     
@@ -542,35 +509,26 @@ def main():
     ckpt = torch.load(args.resume, map_location='cpu') if args.resume else None
 
     encoder = LatentEncoder(cfg=ae_cfg['encoder']).to(device)
-    # Frozen decoder (stage 1) or the one stage 1 used (stage 2: its checkpoints record only where it came from).
+    # the frozen decoder (stage 1), or the one stage 1 used (stage-1 checkpoints record only its source)
     dec_src = args.decoder if args.encoder_only else None
     if args.stage2 and 'decoder' not in ckpt: dec_src = ckpt.get('decoder_source')
     enc_ln_init = train_cfg.get('enc_ln_init') == 'official' and not args.resume and not args.init_encoder
-    # official vocoder.onnx, parsed once: (decoder state, latent mean, latent std, normalizer scale)
     official = supertonic3_decoder_state(args.official_onnx) if dec_src == "official" or enc_ln_init else None
     decoder = LatentDecoder1D(cfg=decoder_cfg).to(device)
-    if dec_src == "official":
-        if decoder_cfg.get('pad_mode') != 'replicate':
-            raise SystemExit("the official decoder needs ae.decoder.pad_mode 'replicate' (see config/tts_st3.json)")
-        decoder.load_state_dict(official[0], strict=True)
-    elif dec_src:
-        decoder.load_state_dict(torch.load(dec_src, map_location=device)['decoder'])
-    if args.stage2 and dec_src and args.local_rank == 0:
-        logger.info(f"Stage 2: decoder from {dec_src}, trainable at lr x{dec_lr_scale}")
+    if dec_src == "official": decoder.load_state_dict(official[0], strict=True)
+    elif dec_src: decoder.load_state_dict(torch.load(dec_src, map_location=device)['decoder'])
     decoder_source = None
     if args.encoder_only:
         # frozen, so not DDP-wrapped: it has nothing to synchronise
         decoder_source = args.decoder
         decoder.requires_grad_(False); decoder.eval()
-    # Stage 2 keeps the decoder's BatchNorm statistics: the official decoder's final BatchNorm re-estimated on a
-    # new encoder's latents no longer matches the weights after it, and reconstruction breaks.
+    # stage 2 keeps the decoder's BatchNorm statistics: re-estimated on new latents they break reconstruction
     dec_bns = [m for m in decoder.modules() if isinstance(m, nn.modules.batchnorm._BatchNorm)] if args.stage2 else []
 
-    if enc_ln_init:
-        init_encoder_ln(encoder, official[1], official[2])
-        if args.local_rank == 0: logger.info("Encoder final LayerNorm initialised to the official latent std / mean")
+    if enc_ln_init:   # a fresh encoder starts in the official latent range (LayerNorm affine = latent std / mean)
+        with torch.no_grad(): encoder.norm.norm.weight.copy_(official[2].reshape(-1)); encoder.norm.norm.bias.copy_(official[1].reshape(-1))
     if train_cfg.get('sync_bn', False) and dist.get_world_size() > 1:
-        # per-GPU BatchNorm statistics over a small per-GPU batch are noisy enough to collapse the encoder stem
+        # per-GPU statistics over a small batch can collapse the encoder stem
         encoder = nn.SyncBatchNorm.convert_sync_batchnorm(encoder)
     encoder = DDP(encoder, device_ids=ddp_ids)
     if not args.encoder_only: decoder = DDP(decoder, device_ids=ddp_ids)
@@ -587,7 +545,7 @@ def main():
     enc_named = list(_mod(encoder).named_parameters())
     if args.encoder_only or args.stage2: g_groups = param_groups(enc_named, lr, no_decay_norms)
     else: g_groups = param_groups(enc_named + list(_mod(decoder).named_parameters()), lr, no_decay_norms)
-    # stage 2: the decoder in groups of its own, after the encoder's, so a stage-1 optimizer state still loads
+    # stage 2: decoder groups after the encoder's, so a stage-1 optimizer state still loads
     dec_groups = param_groups(_mod(decoder).named_parameters(), lr * dec_lr_scale, no_decay_norms) if args.stage2 else []
     n_enc_groups = len(g_groups)
     opt_g = torch.optim.AdamW(g_groups, lr=lr, betas=betas, weight_decay=wd)
@@ -609,14 +567,11 @@ def main():
         schedulers, lr_sched = cosine_schedulers(opt_g, opt_d, args.continue_cosine, args.lr_warmup)
         if args.local_rank == 0: logger.info(f"New schedule from step {step}: {args.lr_warmup} warm-up steps, cosine over {args.continue_cosine} steps from lr {lr}")
     if lr_schedule == 'plateau':
-        # The step the decoder became trainable (its lr ramps from there); kept across stage-2 resumes.
-        dec_from = ckpt.get('dec_trainable_from', step) if args.stage2 else None   # only stage-2 checkpoints record it
+        dec_from = ckpt.get('dec_trainable_from', step) if args.stage2 else None   # the decoder lr ramps from here
         for i, g in enumerate(opt_g.param_groups):
             g['base_lr'], g['ramp_from'] = (lr, None) if i < n_enc_groups else (lr * dec_lr_scale, dec_from)
         for g in opt_d.param_groups: g['base_lr'], g['ramp_from'] = lr, None
-        val_src = args.val_data or data_cfg.get('val_metadata')
-        if not val_src: raise SystemExit("lr_schedule 'plateau' needs held-out audio: --val_data or ae.data.val_metadata")
-        val_ds = TTSDataset(val_src, sample_rate=data_cfg['sample_rate'])   # not cropped: first segment_size samples below
+        val_ds = TTSDataset(data_cfg['val_metadata'], sample_rate=data_cfg['sample_rate'])
         val_clips = [val_ds[i][:data_cfg.get('segment_size')] for i in range(min(len(val_ds), train_cfg.get('val_clips', 64)))]
         eval_interval = train_cfg.get('eval_interval', 10000)
     terms = ExtraTerms(tail_w=args.tail_consistency, hiband_w=args.hiband_w, floor_w=args.floor_w, floor_db=args.floor_db)
@@ -624,18 +579,15 @@ def main():
         stats = torch.load(args.tail_stats, map_location='cpu')
         terms.tail_norm = (stats['mean'].view(1, -1, 1).to(device), stats['std'].view(1, -1, 1).to(device))
 
-    # Generator EMA (ema > 0): what the held-out check and the eval render use. A frozen decoder is its own EMA.
-    enc_ema = dec_ema = None
-    eval_enc = lambda: enc_ema if enc_ema is not None else encoder
-    eval_dec = lambda: dec_ema if dec_ema is not None else decoder
+    # generator EMA, used by the held-out check and eval renders; a frozen decoder is its own EMA
+    enc_ema, dec_ema = encoder, decoder
     if ema_decay > 0:
         enc_ema = copy.deepcopy(_mod(encoder)).eval().requires_grad_(False)
-        dec_ema = decoder if args.encoder_only else copy.deepcopy(_mod(decoder)).eval().requires_grad_(False)
+        if not args.encoder_only: dec_ema = copy.deepcopy(_mod(decoder)).eval().requires_grad_(False)
         if step > 0:
             if 'encoder_ema' in ckpt: enc_ema.load_state_dict(ckpt['encoder_ema'])
             if 'decoder_ema' in ckpt and not args.encoder_only: dec_ema.load_state_dict(ckpt['decoder_ema'])
-    # What must never move: the whole frozen decoder (stage 1), or the decoder's BatchNorm running statistics
-    # (stage 2; the affine trains). Taken after load_checkpoint, which may load the stage-2 decoder.
+    # must never move: the frozen decoder (stage 1) or the decoder's BatchNorm statistics (stage 2)
     def frozen_state():
         if args.encoder_only: return decoder.state_dict()
         return {f"{i}.{k}": v for i, m in enumerate(dec_bns) for k, v in m.named_buffers()}
@@ -653,7 +605,7 @@ def main():
         assert all(torch.equal(v.detach().cpu(), frozen_ref[k]) for k, v in frozen_state().items()), "frozen decoder state changed"
         extra = {"ae_config": ae_cfg, "stage": 1 if args.encoder_only else 2 if args.stage2 else 0}
         if args.stage2: extra["dec_trainable_from"] = dec_from
-        if enc_ema is not None:
+        if ema_decay > 0:
             extra["encoder_ema"] = enc_ema.state_dict()
             if not args.encoder_only: extra["decoder_ema"] = dec_ema.state_dict()
         save_checkpoint(step, epoch, encoder, decoder, mpd, mrd, opt_g, opt_d, schedulers, logger, ckpt_dir, decoder_source, extra)
@@ -676,21 +628,20 @@ def main():
             loss_g, loss_d, loss_mel, extras = result
             if lr_schedule != 'plateau':
                 for s in schedulers.values(): s.step()
-            if enc_ema is not None:
+            if ema_decay > 0:
                 ema_update(enc_ema, _mod(encoder), ema_decay)
                 if not args.encoder_only: ema_update(dec_ema, _mod(decoder), ema_decay)
 
             if lr_schedule == 'plateau' and step > 0 and step % eval_interval == 0:
-                # rank 0 scores, every rank applies the same decision
-                val = torch.zeros(1, device=device)
+                val = torch.zeros(1, device=device)   # rank 0 scores, every rank applies the same decision
                 if args.local_rank == 0:
-                    val[0] = heldout_recon(_mod(eval_enc()), _mod(eval_dec()), mel_transform_input, mel_transforms_loss, val_clips, device)
+                    val[0] = heldout_recon(_mod(enc_ema), _mod(dec_ema), mel_transform_input, mel_transforms_loss, val_clips, device)
                     set_train_modes()
                 dist.broadcast(val, 0)
-                halved = lr_sched.report(val.item())
+                lr_sched.report(val.item())
                 if args.local_rank == 0:
                     writer.add_scalar("Loss/Heldout_Recon", val.item(), step)
-                    logger.info(f"step {step}: held-out recon {val.item():.4f} (best {lr_sched.best:.4f})" + (f", lr halved to {lr * lr_sched.scale:.2e}" if halved else ""))
+                    logger.info(f"step {step}: held-out recon {val.item():.4f}, best {lr_sched.best:.4f}, lr {lr * lr_sched.scale:.2e}")
             
             if args.local_rank == 0:
                 g_meter.update(loss_g); d_meter.update(loss_d); mel_meter.update(loss_mel)
@@ -701,8 +652,8 @@ def main():
                 if step % train_cfg['save_interval'] == 0:
                     save(step); last_saved = step
                     if args.eval_input:
-                        evaluate(eval_enc(), eval_dec(), mel_transform_input, args.eval_input, os.path.join(ckpt_dir, "eval"), step, device, data_cfg['sample_rate'], args.local_rank, keep_decoder_eval=args.encoder_only)
-                        set_train_modes()   # evaluate() leaves the encoder (and a trainable decoder) in train mode, BatchNorm included
+                        evaluate(enc_ema, dec_ema, mel_transform_input, args.eval_input, os.path.join(ckpt_dir, "eval"), step, device, data_cfg['sample_rate'], args.local_rank, keep_decoder_eval=args.encoder_only)
+                        set_train_modes()   # evaluate() leaves BatchNorm in train mode
             step += 1
         epoch += 1
     if args.local_rank == 0 and step >= args.total_steps and last_saved != step - 1:
