@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .modules import ConvNeXtBlock, LayerNorm1d
+from .modules import ConvNeXtBlock, LayerNorm1d, SameConv1d
 
 class LatentEncoder(nn.Module):
     def __init__(self, cfg=None):
@@ -24,8 +24,9 @@ class LatentEncoder(nn.Module):
         intermediate_dim = cfg['intermediate_dim']
         dilations = cfg['dilation_lst']
 
+        pad_mode = cfg.get('pad_mode', 'zeros')
         self.stem = nn.Sequential(
-            nn.Conv1d(in_channels, dim, kernel_size=kernel_size, padding=kernel_size//2),
+            SameConv1d(in_channels, dim, kernel_size=kernel_size, pad_mode=pad_mode),
             nn.BatchNorm1d(dim),
         )
 
@@ -34,7 +35,8 @@ class LatentEncoder(nn.Module):
                 dim=dim, 
                 intermediate_dim=intermediate_dim, 
                 kernel_size=kernel_size, 
-                dilation=d
+                dilation=d,
+                pad_mode=pad_mode,
             )
             for d in dilations
         ])

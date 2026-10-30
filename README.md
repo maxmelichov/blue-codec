@@ -24,6 +24,12 @@ For detailed instructions on how to train the Autoencoder, please refer to the [
 
 The trainer also supports encoder-only training against a frozen decoder and the optional training terms of the E12b model (see the documentation).
 
+Two-stage training on the official Supertonic-3 decoder: [section 6](docs/training.md#-6-two-stage-training-on-the-official-supertonic-3-decoder).
+
+## References and acknowledgements
+
+The official decoder is the vocoder of [Supertonic 3](https://huggingface.co/Supertone/supertonic-3) by Supertone Inc. (SupertonicTTS, [arXiv:2503.23108](https://arxiv.org/abs/2503.23108)). Its weights are under the [OpenRAIL-M license](https://huggingface.co/Supertone/supertonic-3/blob/main/LICENSE), are downloaded at run time and not bundled here; stage-2 checkpoints contain a fine-tuned copy of them.
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

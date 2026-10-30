@@ -8,7 +8,7 @@ from huggingface_hub.errors import EntryNotFoundError, LocalEntryNotFoundError, 
 from safetensors.torch import load_file
 
 from bluecodec.autoencoder.latent_encoder import LatentEncoder
-from bluecodec.autoencoder.latent_decoder import LatentDecoder1D
+from bluecodec.autoencoder.latent_decoder import LatentDecoder1D, REPLICATE_DECODER_CFG
 from bluecodec.autoencoder.discriminators import MultiPeriodDiscriminator, MultiResolutionDiscriminator
 from bluecodec.utils import MelSpectrogramNoLog, LinearMelSpectrogram
 
@@ -18,12 +18,7 @@ HOP = 512
 # was trained on audio padded to a multiple of 3072 samples (hop 512 x compression 6).
 E12B_FILE = "e12b/model.safetensors"
 E12B_CHUNK = 3072
-E12B_DECODER_CFG = {
-    "idim": 24, "hdim": 512, "intermediate_dim": 2048, "ksz": 7,
-    "dilation_lst": [1, 2, 4, 1, 2, 4, 1, 1, 1, 1],
-    "head": {"idim": 512, "hdim": 2048, "odim": 512, "ksz": 3},
-    "chunk_compress_factor": 1, "normalizer_scale": 1.0, "pad_mode": "replicate",
-}
+E12B_DECODER_CFG = REPLICATE_DECODER_CFG
 
 
 def _weights_path(repo_id, filename):
@@ -52,7 +47,6 @@ class BlueCodec(nn.Module):
         if model is None:
             codec = cls()
             sd = load_file(_weights_path(repo_id, filename or "model.safetensors"), device=device)
-            codec.load_state_dict(sd, strict=False)
         elif model == "e12b":
             codec = cls(decoder_cfg=dict(E12B_DECODER_CFG), chunk=E12B_CHUNK)
             filename = filename or E12B_FILE
@@ -62,10 +56,10 @@ class BlueCodec(nn.Module):
                 raise FileNotFoundError(
                     f"E12b weights not found at {repo_id}/{filename}: they are not published on the Hub yet. "
                     "Pass a local directory as repo_id if you have them.") from e
-            codec.encoder.load_state_dict({k[8:]: v for k, v in sd.items() if k.startswith("encoder.")}, strict=True)
-            codec.decoder.load_state_dict({k[8:]: v for k, v in sd.items() if k.startswith("decoder.")}, strict=True)
         else:
             raise ValueError(f"model must be None or 'e12b', got {model!r}")
+        codec.encoder.load_state_dict({k[8:]: v for k, v in sd.items() if k.startswith("encoder.")}, strict=True)
+        codec.decoder.load_state_dict({k[8:]: v for k, v in sd.items() if k.startswith("decoder.")}, strict=True)
         codec.to(device)
         codec.eval()
         return codec

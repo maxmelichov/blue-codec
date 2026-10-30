@@ -70,7 +70,7 @@ uv run torchrun --nproc_per_node=2 train_autoencoder.py \
 | Flag | Meaning |
 |------|---------|
 | `--encoder_only` | Decoder frozen (no gradients, `eval()`, not DDP-wrapped, not in any optimizer), asserted unchanged at every save; checkpoints store `decoder_source` instead of the decoder weights. |
-| `--decoder` | AE `.pt` checkpoint whose decoder is frozen. |
+| `--decoder` | AE `.pt` checkpoint whose decoder is frozen, or `official` (section 6). |
 | `--init_encoder` | Encoder initialisation: an AE `.pt` checkpoint or a BlueCodec `.safetensors` (e.g. the Hub `model.safetensors`). Fresh optimizer, step 0. |
 | `--total_steps` | Loop length and cosine `T_max` (lr down to 1e-6). |
 | `--batch_size` | Per-process batch size (overrides `ae.train.batch_size`). |
@@ -113,6 +113,34 @@ uv run torchrun --nproc_per_node=2 train_autoencoder.py \
 The first 50k steps used a 5k-step warm-up to 1.25e-5 with `--no_bn_freeze`. Details: [technical report §10](../assets/TechnicalReport.md#10-e12b-training-additions).
 
 The trainer falls back to CPU (gloo) when no GPU is visible, which is enough for a smoke test.
+
+---
+
+## 🧭 6. Two-Stage Training on the Official Supertonic-3 Decoder
+
+Stage 1 trains a new encoder against the frozen official Supertonic-3 vocoder (mapped 1:1 onto `LatentDecoder1D`); stage 2 also trains the decoder. Set `ae.data.train_metadata` and `ae.data.val_metadata` (held-out audio) in `config/tts_st3.json`.
+
+```bash
+# Stage 1
+uv run torchrun --nproc_per_node=2 train_autoencoder.py --arch_config config/tts_st3.json \
+    --encoder_only --decoder official --checkpoint_dir checkpoints/ae_st3
+# Stage 2, once the stage-1 held-out loss plateaus (the same command resumes a stopped stage 2)
+uv run torchrun --nproc_per_node=2 train_autoencoder.py --arch_config config/tts_st3.json \
+    --stage2 --resume checkpoints/ae_st3/ae_latest.pt --checkpoint_dir checkpoints/ae_st3 --total_steps 1500000
+```
+
+`--official_onnx path/to/vocoder.onnx` reads a local copy instead of downloading it.
+
+The recipe keys (SupertonicTTS sec. 3.1.2 / App. B.1) are in `ae.train`; a missing key keeps the default recipe. `recon: linmel_fullband` (mel L1 on linear magnitudes up to sr/2, whole segment), `fm_composite`, AdamW 2e-4 with betas (0.9, 0.999), `no_decay_norms` (no weight decay on norms, biases, slopes, gammas), `clip_generator: false` (only the discriminators are clipped), generator `ema` 0.999 (used by the held-out check and eval renders), `sync_bn`, `tf32: false`, and `enc_ln_init: official` (a fresh encoder's final LayerNorm starts at the official latent std / mean). `lr_schedule: plateau` warms up for `warmup_steps`, then keeps the lr flat and halves it when the held-out loss has not improved by 1% for 3 checks (every 10k steps), down to 1e-5 (keys, with their code defaults: `min_lr` 1e-5, `plateau_patience` 3, `plateau_threshold` 0.01, `eval_interval` 10000, `val_clips` 64). In stage 2 the decoder trains at `dec_lr_scale` x lr, ramped from 0 over `dec_warmup_steps` because its Adam moments are fresh, and its BatchNorm running statistics stay frozen (checked at every save): re-estimated on the new encoder's latents they break reconstruction. `pad_mode: replicate` is edge padding, as in the official graphs.
+
+Internal held-out set, EMA weights:
+
+| | linear-mel L1 | log-mel L1 | PESQ-WB |
+|---|---|---|---|
+| Stage 2, step 420k | 0.435 | 0.506 | 3.41 |
+| Previous autoencoder | | 0.505 | 2.49 |
+
+The new encoder defines a new latent space: recompute latent statistics with it. Checkpoints store their `ae_config` and `stage`; a run saves once more at `--total_steps`.
 
 ---
 

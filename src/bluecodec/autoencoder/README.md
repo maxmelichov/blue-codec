@@ -56,6 +56,7 @@ Non-causal encoder that maps spectral features to 24-dimensional latents.
 | `ksz` | 7 | Kernel size |
 | `dilation_lst` | `[1]*10` | Dilation per block |
 | `odim` | 24 | Latent channels |
+| `pad_mode` | `"zeros"` | `"replicate"`: edge padding |
 
 Architecture: stem (`Conv1d + BN`) → 10 × `ConvNeXtBlock` → projection `Conv1d(1×1)` → `LayerNorm1d`.
 
@@ -85,6 +86,8 @@ Causal decoder that reconstructs waveform from latents. Accepts both raw latents
 | `head.ksz` | 3 | Head causal conv kernel size |
 
 Architecture: `CausalInputProjection` → 10 × `CausalConvNeXtBlock` → `BatchNorm1d` → `VocoderHead` (causal conv → PReLU → 1×1 conv → reshape to waveform).
+
+`supertonic3_decoder_state(onnx_path=None)` maps the official Supertonic-3 `vocoder.onnx` onto this decoder with `pad_mode: "replicate"` (needs `pip install onnx`).
 
 `load_state_dict` contains a remapping layer that handles several historical checkpoint key layouts (`input_conv.*`, `blocks.*`, `head.conv1.*`, etc.) so older checkpoints load without manual surgery.
 

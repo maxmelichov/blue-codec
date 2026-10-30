@@ -47,22 +47,21 @@ class VocoderHead(nn.Module):
         x = x.reshape(x.shape[0], -1)
         return x
 
+# Defaults based on configs/tts.json -> ae.decoder (the 1.5M decoder). The replicate variant: E12b and Supertonic-3.
+DEFAULT_DECODER_CFG = {
+    "idim": 24, "hdim": 512, "intermediate_dim": 2048, "ksz": 7,
+    "dilation_lst": [1, 2, 4, 1, 2, 4, 1, 1, 1, 1],
+    "head": {"idim": 512, "hdim": 2048, "odim": 512, "ksz": 3},
+    "chunk_compress_factor": 1, "normalizer_scale": 1.0, "pad_mode": "zeros",
+}
+REPLICATE_DECODER_CFG = {**DEFAULT_DECODER_CFG, "pad_mode": "replicate"}
+
 class LatentDecoder1D(nn.Module):
     def __init__(self, cfg=None):
         super().__init__()
 
-        # Defaults based on configs/tts.json -> ae.decoder.
         if cfg is None:
-            cfg = {
-                "idim": 24,
-                "hdim": 512,
-                "intermediate_dim": 2048,
-                "ksz": 7,
-                "dilation_lst": [1, 2, 4, 1, 2, 4, 1, 1, 1, 1],
-                "head": {"idim": 512, "hdim": 2048, "odim": 512, "ksz": 3},
-                "chunk_compress_factor": 1,
-                "normalizer_scale": 1.0,
-            }
+            cfg = DEFAULT_DECODER_CFG
 
         in_channels = cfg['idim']
         dim = cfg['hdim']
@@ -184,3 +183,26 @@ class LatentDecoder1D(nn.Module):
         x = self.final_norm(x)
         waveform = self.head(x)
         return waveform
+
+
+# Official Supertonic-3 vocoder (OpenRAIL-M, not bundled): downloaded at a pinned revision, needs `pip install onnx`.
+SUPERTONIC3_REVISION = "3cadd1ee6394adea1bd021217a0e650ede09a323"   # vocoder.onnx md5 68e5b768810cb3c2cf7a27f3ce2494e3
+_SUPERTONIC3_ALIAS = {"onnx::Conv_1441": "embed.net.weight", "onnx::Conv_1442": "embed.net.bias", "onnx::PRelu_1506": "head.act.weight"}
+
+
+def supertonic3_decoder_state(onnx_path=None):
+    """vocoder.onnx as a LatentDecoder1D(REPLICATE_DECODER_CFG) state dict, plus the graph's latent mean and std."""
+    import onnx
+    from onnx import numpy_helper
+    if onnx_path is None:
+        from huggingface_hub import hf_hub_download
+        onnx_path = hf_hub_download("Supertone/supertonic-3", "onnx/vocoder.onnx", revision=SUPERTONIC3_REVISION)
+    with torch.random.fork_rng(devices=[]):   # only the shapes are needed; leave the caller's RNG alone
+        ref = LatentDecoder1D(cfg=REPLICATE_DECODER_CFG).state_dict()
+    off = {t.name: torch.from_numpy(numpy_helper.to_array(t).copy()) for t in onnx.load(onnx_path).graph.initializer}
+    sd = {"final_norm.norm.num_batches_tracked": ref["final_norm.norm.num_batches_tracked"]}
+    for k, v in off.items():
+        n = k[len("tts.ae.decoder."):] if k.startswith("tts.ae.decoder.") else _SUPERTONIC3_ALIAS.get(k)
+        if n is not None: sd[n] = v.reshape(ref[n].shape)
+    return sd, off["tts.ae.latent_mean"], off["tts.ae.latent_std"]
+
