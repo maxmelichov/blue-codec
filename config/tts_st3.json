@@ -1,9 +1,7 @@
 {
     "ae": {
         "data": {
-            "train_metadata": [
-                "path/to/train_audio"
-            ],
+            "train_metadata": ["path/to/train_audio"],
             "val_metadata": "path/to/heldout_audio",
             "sample_rate": 44100,
             "hop_length": 512,
@@ -14,12 +12,7 @@
             "num_workers": 8,
             "lr": 0.0002,
             "save_interval": 1000,
-            "log_interval": 10,
-            "betas": [
-                0.9,
-                0.999
-            ],
-            "weight_decay": 0.01,
+            "betas": [0.9, 0.999],
             "no_decay_norms": true,
             "clip_generator": false,
             "ema": 0.999,
@@ -30,11 +23,6 @@
             "enc_ln_init": "official",
             "lr_schedule": "plateau",
             "warmup_steps": 500,
-            "min_lr": 1e-05,
-            "plateau_patience": 3,
-            "plateau_threshold": 0.01,
-            "eval_interval": 10000,
-            "val_clips": 64,
             "dec_lr_scale": 0.1,
             "dec_warmup_steps": 2000
         },
@@ -44,31 +32,11 @@
         "chunk_compress_factor": 1,
         "ldim": 24,
         "encoder": {
-            "spec_processor": {
-                "n_fft": 2048,
-                "win_length": 2048,
-                "hop_length": 512,
-                "n_mels": 228,
-                "sample_rate": 44100,
-                "eps": 1e-05,
-                "norm_mean": 0.0,
-                "norm_std": 1.0
-            },
+            "spec_processor": {"n_fft": 2048, "win_length": 2048, "hop_length": 512, "n_mels": 228, "sample_rate": 44100, "eps": 1e-05, "norm_mean": 0.0, "norm_std": 1.0},
             "ksz_init": 7,
             "ksz": 7,
             "num_layers": 10,
-            "dilation_lst": [
-                1,
-                1,
-                1,
-                1,
-                1,
-                1,
-                1,
-                1,
-                1,
-                1
-            ],
+            "dilation_lst": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
             "intermediate_dim": 2048,
             "idim": 1253,
             "hdim": 512,
@@ -79,27 +47,11 @@
             "ksz_init": 7,
             "ksz": 7,
             "num_layers": 10,
-            "dilation_lst": [
-                1,
-                2,
-                4,
-                1,
-                2,
-                4,
-                1,
-                1,
-                1,
-                1
-            ],
+            "dilation_lst": [1, 2, 4, 1, 2, 4, 1, 1, 1, 1],
             "intermediate_dim": 2048,
             "idim": 24,
             "hdim": 512,
-            "head": {
-                "idim": 512,
-                "hdim": 2048,
-                "odim": 512,
-                "ksz": 3
-            },
+            "head": {"idim": 512, "hdim": 2048, "odim": 512, "ksz": 3},
             "pad_mode": "replicate"
         }
     }

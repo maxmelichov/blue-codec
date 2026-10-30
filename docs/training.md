@@ -118,49 +118,29 @@ The trainer falls back to CPU (gloo) when no GPU is visible, which is enough for
 
 ## 🧭 6. Two-Stage Training on the Official Supertonic-3 Decoder
 
-The current recipe. The decoder is the official Supertonic-3 vocoder (downloaded at a pinned revision, mapped 1:1 onto `LatentDecoder1D`; its output matches the ONNX graph to ~1e-6 relative L2). A new encoder learns that decoder's latent space first, then both are fine-tuned together. Everything the recipe changes is in `config/tts_st3.json`; set `ae.data.train_metadata` and `ae.data.val_metadata` (held-out audio) there.
+Stage 1 trains a new encoder against the frozen official Supertonic-3 vocoder (mapped 1:1 onto `LatentDecoder1D`); stage 2 also trains the decoder. Set `ae.data.train_metadata` and `ae.data.val_metadata` (held-out audio) in `config/tts_st3.json`.
 
 ```bash
-# Stage 1: encoder only, decoder frozen
+# Stage 1
 uv run torchrun --nproc_per_node=2 train_autoencoder.py --arch_config config/tts_st3.json \
     --encoder_only --decoder official --checkpoint_dir checkpoints/ae_st3
-
-# Stage 2: when the held-out loss of stage 1 plateaus, continue from its last checkpoint with the decoder trainable
+# Stage 2, once the stage-1 held-out loss plateaus (the same command resumes a stopped stage 2)
 uv run torchrun --nproc_per_node=2 train_autoencoder.py --arch_config config/tts_st3.json \
     --stage2 --resume checkpoints/ae_st3/ae_latest.pt --checkpoint_dir checkpoints/ae_st3 --total_steps 1500000
 ```
 
-Use `--official_onnx path/to/vocoder.onnx` to read a local copy instead of downloading it. A stage-2 run that stopped is resumed with the same `--stage2 --resume .../ae_latest.pt` command.
+`--official_onnx path/to/vocoder.onnx` reads a local copy instead of downloading it.
 
-**Losses** are the paper's (SupertonicTTS sec. 3.1.2 / App. B.1) and nothing else: multi-resolution mel L1 x45 on **linear** magnitudes up to sr/2 over the whole segment (`"recon": "linmel_fullband"`), LSGAN adversarial x1 and feature matching x0.1 averaged over the MPD and MRD layers together (`"fm_composite": true`), adversarial terms on 0.19 s crops.
+The recipe keys (SupertonicTTS sec. 3.1.2 / App. B.1) are in `ae.train`; a missing key keeps the default recipe. `recon: linmel_fullband` (mel L1 on linear magnitudes up to sr/2, whole segment), `fm_composite`, AdamW 2e-4 with betas (0.9, 0.999), `no_decay_norms` (no weight decay on norms, biases, slopes, gammas), `clip_generator: false` (only the discriminators are clipped), generator `ema` 0.999 (used by the held-out check and eval renders), `sync_bn`, `tf32: false`, and `enc_ln_init: official` (a fresh encoder's final LayerNorm starts at the official latent std / mean). `lr_schedule: plateau` warms up for `warmup_steps`, then keeps the lr flat and halves it when the held-out loss has not improved by 1% for 3 checks (every 10k steps), down to 1e-5. In stage 2 the decoder trains at `dec_lr_scale` x lr, ramped from 0 over `dec_warmup_steps` because its Adam moments are fresh, and its BatchNorm running statistics stay frozen (checked at every save): re-estimated on the new encoder's latents they break reconstruction. `pad_mode: replicate` is edge padding, as in the official graphs.
 
-**Model**: the 1253-feature encoder input (1025 linear + 228 mel bins) and 10 ConvNeXt blocks with a final LayerNorm, as in Supertonic-3; `"pad_mode": "replicate"` (encoder and decoder) pads the convolutions with edge values instead of zeros, like every Pad node of the official graphs. On a fresh start the encoder's final LayerNorm weight/bias are set to the official latent std/mean (`"enc_ln_init": "official"`), so the first latents already fall in the range the decoder was trained on.
+Internal held-out set, EMA weights:
 
-**Optimisation** (`ae.train`):
+| | linear-mel L1 | log-mel L1 | PESQ-WB |
+|---|---|---|---|
+| Stage 2, step 420k | 0.435 | 0.506 | 3.41 |
+| Previous autoencoder | | 0.505 | 2.49 |
 
-| Key | Value | Why |
-|-----|-------|-----|
-| `lr`, `betas` | 2e-4, (0.9, 0.999) | AdamW, the paper's rate |
-| `no_decay_norms` | true | No weight decay on norms, biases, PReLU slopes and layer-scale gammas |
-| `clip_generator` | false | Encoder/decoder gradients are not clipped; discriminators are clipped at 1 |
-| `ema` | 0.999 | Generator EMA, saved as `encoder_ema` / `decoder_ema`; held-out checks and eval renders use it |
-| `sync_bn` | true | Encoder BatchNorm statistics over all GPUs, not per GPU |
-| `lr_schedule` | `plateau` | 500 warm-up steps, then a flat lr, halved (G and D) when the held-out recon loss has not improved by 1% for 3 checks (`eval_interval` 10k steps), never below `min_lr` 1e-5 |
-| `dec_lr_scale`, `dec_warmup_steps` | 0.1, 2000 | Stage 2: decoder lr = 0.1 x lr, ramped linearly from 0 over 2000 steps |
-
-`"tf32": false` disables TF32, so training is strict fp32.
-
-**Stage 1** is `--encoder_only` (table above) against the official decoder. **Stage 2** loads the decoder that stage 1 used and makes it trainable. The encoder keeps its Adam moments; the decoder starts with fresh ones, which is why its lr ramps up. The decoder's BatchNorm running statistics stay frozen and are checked at every save (its affine parameters still train): re-estimating the official final BatchNorm on the new encoder's latents breaks reconstruction. Every checkpoint stores the `ae` config it was trained with (`ae_config`) and its `stage`. Training stops at `--total_steps` with a final save.
-
-Results on an internal held-out set (EMA weights, mel L1 as in training):
-
-| | linear-mel L1 | log-mel L1 |
-|---|---:|---:|
-| Stage 1, plateau | ~0.55 | |
-| Stage 2, step 420k | 0.435 | 0.506 |
-| Previous autoencoder, same set | | 0.505 |
-
-On 200 held-out clips the stage-2 model scores PESQ-WB 3.41, STOI 0.971, speaker cosine (input vs reconstruction) 0.971 and a phoneme error rate of 7.8%. Its latents are a new latent space: recompute any latent statistics with this encoder.
+The new encoder defines a new latent space: recompute latent statistics with it. Checkpoints store their `ae_config` and `stage`; a run saves once more at `--total_steps`.
 
 ---
 
