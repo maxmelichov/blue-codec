@@ -357,7 +357,8 @@ def load_checkpoint(args, ckpt, encoder, decoder, mpd, mrd, opt_g, opt_d, schedu
         return ckpt['step'] + 1, ckpt.get('epoch', 0)
 
     def opt_match(opt, sd):
-        return sd and len(opt.param_groups) == len(sd['param_groups']) and all(len(g['params']) == len(sg['params']) for g, sg in zip(opt.param_groups, sd['param_groups']))
+        return sd and len(opt.param_groups) == len(sd['param_groups']) and \
+            all(len(g['params']) == len(sg['params']) for g, sg in zip(opt.param_groups, sd['param_groups']))
 
     resumed = None
     if ckpt is not None:
@@ -375,7 +376,8 @@ def load_checkpoint(args, ckpt, encoder, decoder, mpd, mrd, opt_g, opt_d, schedu
         if args.local_rank == 0: logger.warning("Optimizer state does not match the model: fresh optimizer, step 0")
     return 0, 0
 
-def save_checkpoint(step, epoch, encoder, decoder, mpd, mrd, opt_g, opt_d, schedulers, logger, ckpt_dir="checkpoints/ae", decoder_source=None, extra=None):
+def save_checkpoint(step, epoch, encoder, decoder, mpd, mrd, opt_g, opt_d, schedulers, logger, ckpt_dir="checkpoints/ae",
+                    decoder_source=None, extra=None):
     state = {
         "step": step, "epoch": epoch,
         "encoder": _mod(encoder).state_dict(),
@@ -436,8 +438,8 @@ def main():
     parser.add_argument('--batch_size', type=int, default=None, help='Per-process batch size (overrides ae.train.batch_size)')
     # --- Encoder-only training against a frozen decoder ---
     parser.add_argument('--encoder_only', action='store_true', help='Freeze the decoder (from --decoder) and train the encoder + discriminators')
-    parser.add_argument('--decoder', type=str, default=None, help='Frozen decoder for --encoder_only: an AE .pt checkpoint, or "official" (Supertonic-3 vocoder)')
-    parser.add_argument('--official_onnx', type=str, default=None, help='Local official vocoder.onnx (default: downloaded at a pinned revision)')
+    parser.add_argument('--decoder', type=str, default=None, help='Frozen decoder for --encoder_only: an AE .pt checkpoint, or "official"')
+    parser.add_argument('--official_onnx', type=str, default=None, help='Local official vocoder.onnx (default: downloaded)')
     parser.add_argument('--init_encoder', type=str, default=None, help='Encoder init: AE .pt checkpoint or BlueCodec .safetensors (fresh optimizer, step 0)')
     parser.add_argument('--d_warmup', type=int, default=0, help='Discriminators frozen, reconstruction-only loss for the first N steps')
     parser.add_argument('--stage2', action='store_true', help='Resume an --encoder_only checkpoint (--resume) with the decoder trainable')
@@ -463,6 +465,7 @@ def main():
     parser.add_argument('--lr_warmup', type=int, default=0, help='With --continue_cosine: linear warm-up steps from 1%% of --lr')
     args = parser.parse_args()
     if args.stage2 and args.encoder_only: raise SystemExit("--stage2 trains the decoder: drop --encoder_only")
+    if args.stage2 and not args.resume: raise SystemExit("--stage2 needs --resume (a stage-1 checkpoint)")
     if args.encoder_only and not args.decoder:
         raise SystemExit("--encoder_only needs --decoder (an AE .pt checkpoint or 'official')")
     if args.tail_consistency > 0 and not (args.edge_aware and args.tail_stats):
@@ -516,10 +519,11 @@ def main():
     dec_src = args.decoder if args.encoder_only else None
     if args.stage2 and 'decoder' not in ckpt: dec_src = ckpt.get('decoder_source')
     enc_ln_init = train_cfg.get('enc_ln_init') == 'official' and not args.resume and not args.init_encoder
-    official = supertonic3_decoder_state(args.official_onnx) if dec_src == "official" or enc_ln_init else None
+    if dec_src == "official" or enc_ln_init: official_sd, latent_mean, latent_std = supertonic3_decoder_state(args.official_onnx)
     decoder = LatentDecoder1D(cfg=decoder_cfg).to(device)
-    if dec_src == "official" and decoder_cfg.get('pad_mode') != 'replicate': raise SystemExit("the official decoder needs ae.decoder.pad_mode 'replicate'")
-    if dec_src == "official": decoder.load_state_dict(official[0], strict=True)
+    if dec_src == "official" and decoder_cfg.get('pad_mode') != 'replicate':
+        raise SystemExit("the official decoder needs ae.decoder.pad_mode 'replicate'")
+    if dec_src == "official": decoder.load_state_dict(official_sd, strict=True)
     elif dec_src: decoder.load_state_dict(torch.load(dec_src, map_location=device)['decoder'])
     decoder_source = None
     if args.encoder_only:
@@ -530,7 +534,7 @@ def main():
     dec_bns = [m for m in decoder.modules() if isinstance(m, nn.modules.batchnorm._BatchNorm)] if args.stage2 else []
 
     if enc_ln_init:   # a fresh encoder starts in the official latent range (LayerNorm affine = latent std / mean)
-        with torch.no_grad(): encoder.norm.norm.weight.copy_(official[2].reshape(-1)); encoder.norm.norm.bias.copy_(official[1].reshape(-1))
+        with torch.no_grad(): encoder.norm.norm.weight.copy_(latent_std.reshape(-1)); encoder.norm.norm.bias.copy_(latent_mean.reshape(-1))
     if train_cfg.get('sync_bn', False) and dist.get_world_size() > 1:
         # per-GPU statistics over a small batch can collapse the encoder stem
         encoder = nn.SyncBatchNorm.convert_sync_batchnorm(encoder)
@@ -556,7 +560,8 @@ def main():
     opt_d = torch.optim.AdamW(list(mpd.parameters()) + list(mrd.parameters()), lr=lr, betas=betas, weight_decay=wd)
     if lr_schedule == 'plateau':
         lr_sched = PlateauLR([opt_g, opt_d], lr, train_cfg.get('warmup_steps', 0), float(train_cfg.get('min_lr', 1e-5)),
-                             train_cfg.get('plateau_patience', 3), train_cfg.get('plateau_threshold', 0.01), train_cfg.get('dec_warmup_steps', 0))
+                             train_cfg.get('plateau_patience', 3), train_cfg.get('plateau_threshold', 0.01),
+                             train_cfg.get('dec_warmup_steps', 0))
         schedulers = {'lr_plateau': lr_sched}
     else:
         schedulers, lr_sched = cosine_schedulers(opt_g, opt_d, args.total_steps)
@@ -656,7 +661,8 @@ def main():
                 if step % train_cfg['save_interval'] == 0:
                     save(step); last_saved = step
                     if args.eval_input:
-                        evaluate(enc_ema, dec_ema, mel_transform_input, args.eval_input, os.path.join(ckpt_dir, "eval"), step, device, data_cfg['sample_rate'], args.local_rank, keep_decoder_eval=args.encoder_only)
+                        evaluate(enc_ema, dec_ema, mel_transform_input, args.eval_input, os.path.join(ckpt_dir, "eval"), step, device,
+                                 data_cfg['sample_rate'], args.local_rank, keep_decoder_eval=args.encoder_only)
                         set_train_modes()   # evaluate() leaves BatchNorm in train mode
             step += 1
         epoch += 1
