@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .modules import ConvNeXtBlock, LayerNorm1d
+from .modules import ConvNeXtBlock, LayerNorm1d, SameConv1d
 
 class LatentEncoder(nn.Module):
     def __init__(self, cfg=None):
@@ -27,9 +27,8 @@ class LatentEncoder(nn.Module):
         # "replicate": edge padding at the clip ends instead of zeros, so the first/last frames do not
         # see an artificial silence. "zeros" (default) = the published encoder.
         pad_mode = cfg.get('pad_mode', 'zeros')
-        self._edge_pad = kernel_size // 2 if pad_mode == "replicate" else 0
         self.stem = nn.Sequential(
-            nn.Conv1d(in_channels, dim, kernel_size=kernel_size, padding=0 if self._edge_pad else kernel_size//2),
+            SameConv1d(in_channels, dim, kernel_size=kernel_size, pad_mode=pad_mode),
             nn.BatchNorm1d(dim),
         )
 
@@ -48,8 +47,6 @@ class LatentEncoder(nn.Module):
         self.norm = LayerNorm1d(out_channels)
 
     def forward(self, x):
-        if self._edge_pad:
-            x = nn.functional.pad(x, (self._edge_pad, self._edge_pad), mode="replicate")
         x = self.stem(x)
         for block in self.blocks:
             x = block(x)
