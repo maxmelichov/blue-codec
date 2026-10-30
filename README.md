@@ -24,7 +24,7 @@ For detailed instructions on how to train the Autoencoder, please refer to the [
 
 The trainer also supports encoder-only training against a frozen decoder and the optional training terms of the E12b model (see the documentation).
 
-The current recipe ([section 6](docs/training.md#-6-two-stage-training-on-the-official-supertonic-3-decoder)) trains in two stages on the official Supertonic-3 decoder: stage 1 trains a new encoder against the frozen decoder, stage 2 fine-tunes both with the decoder at a tenth of the encoder's learning rate. On an internal held-out set it reaches log-mel L1 0.506 (previous autoencoder: 0.505), PESQ-WB 3.41, STOI 0.971, speaker cosine 0.971 and a 7.8% phoneme error rate.
+The current recipe trains in two stages on the official Supertonic-3 decoder: see [section 6](docs/training.md#-6-two-stage-training-on-the-official-supertonic-3-decoder) for the commands and held-out results.
 
 ## References and acknowledgements
 
@@ -32,4 +32,4 @@ The official decoder is the vocoder of **Supertonic 3** by Supertone Inc. ([Supe
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details. The official Supertonic-3 decoder is not part of this project and keeps its own OpenRAIL-M license.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

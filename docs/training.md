@@ -150,7 +150,7 @@ Use `--official_onnx path/to/vocoder.onnx` to read a local copy instead of downl
 
 `"tf32": false` disables TF32, so training is strict fp32.
 
-**Stage 1** freezes the decoder (no gradients, `eval()`, checked unchanged at every save); checkpoints record `decoder_source` instead of the decoder weights. **Stage 2** loads the decoder that stage 1 used and makes it trainable. The encoder keeps its Adam moments; the decoder starts with fresh ones, which is why its lr ramps up. The decoder's BatchNorm statistics stay frozen (its affine parameters still train). The official decoder's final BatchNorm must keep its stored statistics, because re-estimating them on the new encoder's latents breaks reconstruction. Every checkpoint stores the `ae` config it was trained with (`ae_config`) and its `stage`. Training stops at `--total_steps` with a final save.
+**Stage 1** is `--encoder_only` (table above) against the official decoder. **Stage 2** loads the decoder that stage 1 used and makes it trainable. The encoder keeps its Adam moments; the decoder starts with fresh ones, which is why its lr ramps up. The decoder's BatchNorm running statistics stay frozen and are checked at every save (its affine parameters still train): re-estimating the official final BatchNorm on the new encoder's latents breaks reconstruction. Every checkpoint stores the `ae` config it was trained with (`ae_config`) and its `stage`. Training stops at `--total_steps` with a final save.
 
 Results on an internal held-out set (EMA weights, mel L1 as in training):
 
