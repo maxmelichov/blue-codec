@@ -87,7 +87,7 @@ Causal decoder that reconstructs waveform from latents. Accepts both raw latents
 
 Architecture: `CausalInputProjection` → 10 × `CausalConvNeXtBlock` → `BatchNorm1d` → `VocoderHead` (causal conv → PReLU → 1×1 conv → reshape to waveform).
 
-`supertonic3_decoder_state(reference_sd, onnx_path=None)` maps the official Supertonic-3 `vocoder.onnx` (downloaded at a pinned revision unless `onnx_path` is given; needs `pip install onnx`) 1:1 onto this decoder (built with `pad_mode: "replicate"`, as every Pad node of that graph is edge padding) and also returns the graph's latent mean/std. `train_autoencoder.py --decoder official` uses it.
+`supertonic3_decoder_state(onnx_path=None)` maps the official Supertonic-3 `vocoder.onnx` (downloaded at a pinned revision unless `onnx_path` is given; needs `pip install onnx`) 1:1 onto this decoder (built with `pad_mode: "replicate"`, as every Pad node of that graph is edge padding) and also returns the graph's latent mean/std. `train_autoencoder.py --decoder official` uses it.
 
 `load_state_dict` contains a remapping layer that handles several historical checkpoint key layouts (`input_conv.*`, `blocks.*`, `head.conv1.*`, etc.) so older checkpoints load without manual surgery.
 
