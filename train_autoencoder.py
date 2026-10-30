@@ -462,6 +462,7 @@ def main():
                         help='With --resume: keep the step counter and optimizer state, restart the cosine from --lr over N steps')
     parser.add_argument('--lr_warmup', type=int, default=0, help='With --continue_cosine: linear warm-up steps from 1%% of --lr')
     args = parser.parse_args()
+    if args.stage2 and args.encoder_only: raise SystemExit("--stage2 trains the decoder: drop --encoder_only")
     if args.encoder_only and not args.decoder:
         raise SystemExit("--encoder_only needs --decoder (an AE .pt checkpoint or 'official')")
     if args.tail_consistency > 0 and not (args.edge_aware and args.tail_stats):
@@ -515,6 +516,7 @@ def main():
     enc_ln_init = train_cfg.get('enc_ln_init') == 'official' and not args.resume and not args.init_encoder
     official = supertonic3_decoder_state(args.official_onnx) if dec_src == "official" or enc_ln_init else None
     decoder = LatentDecoder1D(cfg=decoder_cfg).to(device)
+    if dec_src == "official" and decoder_cfg.get('pad_mode') != 'replicate': raise SystemExit("the official decoder needs ae.decoder.pad_mode 'replicate'")
     if dec_src == "official": decoder.load_state_dict(official[0], strict=True)
     elif dec_src: decoder.load_state_dict(torch.load(dec_src, map_location=device)['decoder'])
     decoder_source = None
