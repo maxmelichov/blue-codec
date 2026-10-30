@@ -47,23 +47,27 @@ class VocoderHead(nn.Module):
         x = x.reshape(x.shape[0], -1)
         return x
 
+# Defaults based on configs/tts.json -> ae.decoder (the 1.5M decoder: zero causal padding).
+DEFAULT_DECODER_CFG = {
+    "idim": 24,
+    "hdim": 512,
+    "intermediate_dim": 2048,
+    "ksz": 7,
+    "dilation_lst": [1, 2, 4, 1, 2, 4, 1, 1, 1, 1],
+    "head": {"idim": 512, "hdim": 2048, "odim": 512, "ksz": 3},
+    "chunk_compress_factor": 1,
+    "normalizer_scale": 1.0,
+    "pad_mode": "zeros",
+}
+# The same architecture with replicate causal padding: the official Supertonic-3 vocoder and E12b.
+REPLICATE_DECODER_CFG = {**DEFAULT_DECODER_CFG, "pad_mode": "replicate"}
+
 class LatentDecoder1D(nn.Module):
     def __init__(self, cfg=None):
         super().__init__()
 
-        # Defaults based on configs/tts.json -> ae.decoder.
         if cfg is None:
-            cfg = {
-                "idim": 24,
-                "hdim": 512,
-                "intermediate_dim": 2048,
-                "ksz": 7,
-                "dilation_lst": [1, 2, 4, 1, 2, 4, 1, 1, 1, 1],
-                "head": {"idim": 512, "hdim": 2048, "odim": 512, "ksz": 3},
-                "chunk_compress_factor": 1,
-                "normalizer_scale": 1.0,
-                "pad_mode": "zeros",
-            }
+            cfg = DEFAULT_DECODER_CFG
 
         in_channels = cfg['idim']
         dim = cfg['hdim']
@@ -192,18 +196,13 @@ class LatentDecoder1D(nn.Module):
 # is downloaded at load time and mapped 1:1 onto this decoder. Needs `pip install onnx` (imported lazily).
 SUPERTONIC3_REPO = "Supertone/supertonic-3"
 SUPERTONIC3_REVISION = "3cadd1ee6394adea1bd021217a0e650ede09a323"   # vocoder.onnx md5 68e5b768810cb3c2cf7a27f3ce2494e3
-SUPERTONIC3_DECODER_CFG = {
-    "idim": 24, "hdim": 512, "intermediate_dim": 2048, "ksz": 7,
-    "dilation_lst": [1, 2, 4, 1, 2, 4, 1, 1, 1, 1],
-    "head": {"idim": 512, "hdim": 2048, "odim": 512, "ksz": 3},
-    "chunk_compress_factor": 1, "normalizer_scale": 1.0, "pad_mode": "replicate",
-}
+SUPERTONIC3_DECODER_CFG = REPLICATE_DECODER_CFG
 _SUPERTONIC3_ALIAS = {"onnx::Conv_1441": "embed.net.weight", "onnx::Conv_1442": "embed.net.bias",
                       "onnx::PRelu_1506": "head.act.weight"}
 
 
-def supertonic3_decoder_state(reference_sd, onnx_path=None):
-    """Map the official vocoder.onnx onto a LatentDecoder1D state dict.
+def supertonic3_decoder_state(onnx_path=None):
+    """Map the official vocoder.onnx onto a LatentDecoder1D(SUPERTONIC3_DECODER_CFG) state dict.
 
     Returns (state_dict, latent_mean, latent_std, normalizer_scale); the last three are the
     graph's own input normalisation for [B, 144, T] latents. This decoder takes raw [B, 24, T]
@@ -218,6 +217,7 @@ def supertonic3_decoder_state(reference_sd, onnx_path=None):
     if onnx_path is None:
         from huggingface_hub import hf_hub_download
         onnx_path = hf_hub_download(SUPERTONIC3_REPO, "onnx/vocoder.onnx", revision=SUPERTONIC3_REVISION)
+    reference_sd = LatentDecoder1D(cfg=SUPERTONIC3_DECODER_CFG).state_dict()
     off = {t.name: torch.from_numpy(numpy_helper.to_array(t).copy()) for t in onnx.load(onnx_path).graph.initializer}
     sd = {}
     for k, v in off.items():
