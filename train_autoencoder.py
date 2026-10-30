@@ -496,6 +496,8 @@ def main():
     clip_generator = train_cfg.get('clip_generator', True)
     lr_schedule = train_cfg.get('lr_schedule', 'cosine')
     dec_lr_scale = float(train_cfg.get('dec_lr_scale', 1.0))
+    if args.stage2 and lr_schedule != 'plateau': raise SystemExit("--stage2 needs ae.train.lr_schedule 'plateau'")
+    if args.continue_cosine and lr_schedule != 'cosine': raise SystemExit("--continue_cosine needs ae.train.lr_schedule 'cosine'")
     if not train_cfg.get('tf32', True):   # strict fp32 (cuDNN defaults to TF32 on Ampere+)
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
