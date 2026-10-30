@@ -21,19 +21,12 @@ def _check_pad_mode(pad_mode):
         raise ValueError(f"pad_mode must be 'zeros' or 'replicate', got {pad_mode!r}")
 
 class SameConv1d(nn.Conv1d):
-    """Conv1d padded on both sides (length kept). pad_mode "zeros" (the published encoder) or "replicate": edge
-    padding, like every Pad node of the official graphs, done in forward() so the state_dict keys are the same."""
+    """Length-preserving Conv1d. pad_mode "zeros" (the published encoder) or "replicate" (edge padding, as in the official graphs)."""
     def __init__(self, in_channels, out_channels, kernel_size, dilation=1, pad_mode="zeros", **kwargs):
         _check_pad_mode(pad_mode)
         padding = (kernel_size - 1) * dilation // 2
         self._edge_pad = padding if pad_mode == "replicate" else 0
-        super().__init__(
-            in_channels, out_channels,
-            kernel_size=kernel_size,
-            padding=padding - self._edge_pad,
-            dilation=dilation,
-            **kwargs
-        )
+        super().__init__(in_channels, out_channels, kernel_size=kernel_size, padding=padding - self._edge_pad, dilation=dilation, **kwargs)
 
     def forward(self, x):
         if self._edge_pad:
