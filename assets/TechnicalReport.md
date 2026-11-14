@@ -175,7 +175,7 @@ Each iteration proceeds as follows:
 
 ---
 
-## 8. Key Differences from SupertonicTTS
+## 7. Key Differences from SupertonicTTS
 
 While BlueCodec draws architectural inspiration from SupertonicTTS [1], several design choices diverge. The table below uses exact architecture details from the SupertonicTTS paper (arXiv:2503.23108, Appendix A.1).
 
@@ -204,27 +204,27 @@ The three genuine architectural differences are: **(1)** the dual-channel input 
 
 ---
 
-## 9. Developer Insights & Architectural Rationale
+## 8. Developer Insights & Architectural Rationale
 
 While BlueCodec shares its foundational DNA with SupertonicTTS [1], the deviations introduced here were not arbitrary. They were chosen to improve training stability, synthesis quality, and phonetic coverage while preserving the efficiency of the original design.
 
-### 9.1 The Dual-Branch Input Advantage
+### 8.1 The Dual-Branch Input Advantage
 
 Standard mel spectrograms are effective because they approximate human auditory perception, but that compression inevitably discards part of the high-frequency detail present in the original spectrum. BlueCodec therefore feeds the encoder a 1253-channel dual-branch representation formed by concatenating 1025 log-linear bins with 228 log-mel bins. This gives the model both raw spectral precision and perceptually organized structure at the same time. In practice, this richer representation improved early optimization behavior and accelerated reconstruction-loss convergence relative to mel-only inputs.
 
-### 9.2 PReLU in the Sub-Pixel Vocoder
+### 8.2 PReLU in the Sub-Pixel Vocoder
 
 The decoder must expand a low-rate latent sequence at roughly 86 Hz into a full 44.1 kHz waveform, making the vocoder head a critical capacity bottleneck. Inspired by WaveNeXt, BlueCodec keeps the sub-pixel flattening strategy but inserts a PReLU nonlinearity between the causal projection layers. This is a small modification architecturally, yet an important one functionally: it increases the expressiveness of the head and improves gradient flow when reconstructing fine temporal structure and high-frequency waveform detail.
 
-### 9.3 Taming GAN Instability with Spectral Normalization
+### 8.3 Taming GAN Instability with Spectral Normalization
 
 Adversarial training at high audio fidelity is often unstable, especially when discriminators become too strong early in training. SupertonicTTS uses weight normalization throughout its discriminators, but in BlueCodec the Multi-Resolution Discriminator was deliberately switched to spectral normalization. By constraining the effective Lipschitz behavior of the MRD layers, this change reduces the risk of discriminator domination and helps maintain a smoother optimization trajectory over the full 1.5 million-step run.
 
-### 9.4 A Richer, Multilingual Latent Space
+### 8.4 A Multilingual Latent Space
 
 BlueCodec learns its 24-dimensional latent space from multilingual speech rather than English alone, so the latent represents phonetic patterns that English-only training rarely sees, such as emphatic fricatives, uvulars and pharyngeal-adjacent articulations.
 
-### 9.5 High-Fidelity on Consumer Hardware
+### 8.5 High-Fidelity on Consumer Hardware
 
 Achieving real-time 44.1 kHz streaming synthesis is often associated with large compute clusters. BlueCodec shows that strong neural audio compression can be trained on consumer hardware. Efficient ConvNeXt blocks (depthwise-separable convolutions instead of heavy recurrence), a compact 24-channel latent bottleneck, and the sub-pixel expansion head keep the autoencoder footprint modest (on the order of ~51M parameters for encoder + decoder) while targeting full-band reconstruction.
 
@@ -232,11 +232,11 @@ SupertonicTTS reports Stage 1 training on four RTX 4090 GPUs [1]. Using the same
 
 ---
 
-## 10. E12b Training Additions
+## 9. E12b Training Additions
 
 E12b is a full autoencoder (encoder and decoder) continued from the 1.5M-step model. Its decoder uses replicate causal padding, and its latents are a new space: stats files and downstream models built on the 1.5M model do not transfer to it.
 
-### 10.1 Recipe
+### 9.1 Recipe
 
 Initialisation: the 1.5M encoder and the 1.5M decoder after a decoder-only refit. Then 600k steps on the paper losses (λ_recon 45 on full-band log mel over the whole segment, LSGAN λ_adv 1, feature matching λ_fm 0.1 over MPD and MRD together) plus four terms, all flags of `train_autoencoder.py` ([docs/training.md §5](../docs/training.md)):
 
@@ -249,11 +249,11 @@ Initialisation: the 1.5M encoder and the 1.5M decoder after a decoder-only refit
 
 AdamW (β 0.8, 0.99, wd 0.01), batch 64 per GPU, 5k-step warm-up to 1.25×10⁻⁵, then cosine to 1×10⁻⁶ at 600k; encoder BatchNorm frozen from 50k.
 
-### 10.2 Encoding layout
+### 9.2 Encoding layout
 
 E12b was trained on audio padded to a multiple of 3072 samples (hop 512 × 6), so it is encoded the same way: `6·ceil(L/3072)` latent frames per clip.
 
-### 10.3 Round-trip audit
+### 9.3 Round-trip audit
 
 10 reference clips (resampled to 44.1 kHz), each codec with its own encoding layout:
 
