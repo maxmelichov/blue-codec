@@ -2,7 +2,7 @@
     "ae": {
         "data": {
             "train_metadata": [
-                "datasets_4AE_extracted"
+                "path/to/audio"
             ],
             "val_metadata": "filelists/val.csv",
             "sample_rate": 44100,
