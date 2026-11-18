@@ -14,9 +14,18 @@ See `examples/` folder for a full working example.
 
 ## Pretrained Model
 
-The model was trained on 2x NVIDIA RTX 3090 GPUs for 4 weeks for 1.5 million steps.
+Pretrained weights: [notmax123/blue-codec](https://huggingface.co/notmax123/blue-codec) on Hugging Face, one file
+(`model.safetensors`, the BlueV3 codec; its architecture config is stored inside the file):
 
-Pretrained weights: [notmax123/blue-codec](https://huggingface.co/notmax123/blue-codec) on Hugging Face.
+```python
+from bluecodec import BlueCodec
+codec = BlueCodec.from_pretrained("notmax123/blue-codec")
+latents = codec.encode(audio)        # audio [B, L] at 44.1 kHz -> [B, 24, L // 512 + 1]
+audio_out = codec.decode(latents)
+```
+
+The earlier 1.5M-step codec stays on the Hub under the tag `v3.0.0`:
+`BlueCodec.from_pretrained("notmax123/blue-codec", revision="v3.0.0")`.
 
 ## Training
 
